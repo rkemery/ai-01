@@ -17,10 +17,13 @@ line printed for it shows the statistic that rule used.
 A drop that is not significant warns (with the MDE) and does not block. For
 lower-is-better metrics (`hallucination:lower`) a rise is the drop.
 
-With on_error='exclude', items that errored in either run are left out of the
-comparison, and the gate blocks if more than `max_excluded` of the items (5% by
-default) had to be left out, since the comparison then no longer covers the
-run. Only blocks change the exit code: 0 pass, 1 block.
+With on_error='exclude', a pass/fail item that errored in the candidate but not
+in the baseline counts as a candidate failure, so errors can only make the
+candidate look worse. Items that errored in the baseline, and errored items of
+numeric metrics, are left out. As an extra guard the gate blocks if more than
+`max_excluded` of the items (5% by default) errored in either run, since the
+comparison then no longer covers the run. Only blocks change the exit code:
+0 pass, 1 block.
 """
 
 from __future__ import annotations
@@ -99,8 +102,8 @@ class RegressionResult:
     excluded_limit: int
 
     @property
-    def too_many_excluded(self) -> bool:
-        return len(self.result.excluded) > self.excluded_limit
+    def too_many_errors(self) -> bool:
+        return self.result.n_errored > self.excluded_limit
 
 
 @dataclass(frozen=True)
@@ -176,13 +179,14 @@ def run_gate(
             metric.name,
             use_clusters=use_clusters,
             on_error=on_error,
+            candidate_errors_as=0.0 if metric.higher_is_better else 1.0,
             n_boot=n_boot,
             confidence=1.0 - ALPHA,
             seed=seed,
         )
         limit = math.floor(max_excluded * result.n_items + 1e-9)
         status = regression_status(result, metric.higher_is_better)
-        if len(result.excluded) > limit:
+        if result.n_errored > limit:
             status = "block"
         regressions.append(RegressionResult(metric, result, status, limit))
     return GateResult(floors=floor_results, regressions=tuple(regressions))
@@ -238,19 +242,23 @@ def _regression_line(r: RegressionResult) -> str:
             line += f". Inconclusive, the MDE at this n is about {r.result.mde:.3f}"
         else:  # only the exact McNemar MDE is None for a drop: too few discordant pairs
             line += ". Inconclusive, too few discordant pairs for 80% power at any effect size"
-    if r.result.excluded:
-        excluded = (
-            f"{len(r.result.excluded)} of {r.result.n_items} excluded "
-            f"(candidate {len(r.result.excluded_candidate)}, "
-            f"baseline {len(r.result.excluded_baseline)})"
+    if r.result.n_errored:
+        res = r.result
+        line += (
+            f". Errored items: {res.n_errored} of {res.n_items} (candidate "
+            f"{len(res.excluded_candidate)}, baseline {len(res.excluded_baseline)})"
         )
-        if r.too_many_excluded:
+        if res.imputed:
+            line += f", {len(res.imputed)} candidate-only counted as failures"
+        if res.excluded:
+            line += f", {len(res.excluded)} excluded"
+        if r.too_many_errors:
             line += (
-                f". Errored items: {excluded}, over the limit of {r.excluded_limit}, "
-                "so the comparison no longer covers the run"
+                f", over the limit of {r.excluded_limit}, so the comparison no longer covers "
+                "the run"
             )
         else:
-            line += f". Errored items: {excluded}, limit {r.excluded_limit}"
+            line += f", limit {r.excluded_limit}"
     return line + "."
 
 

@@ -186,7 +186,10 @@ def single_run_id(records: Sequence[EvalRecord]) -> str:
 
 @dataclass(frozen=True)
 class MetricColumn:
-    """One metric from one run, keyed by item_id. Booleans are stored as 0.0 and 1.0."""
+    """One metric from one run, keyed by item_id. Booleans are stored as 0.0 and 1.0.
+
+    `clusters` covers every item, excluded ones included.
+    """
 
     metric: str
     run_id: str
@@ -235,6 +238,7 @@ def metric_column(
                     f"because of an error: {record.error}"
                 )
             excluded.append(record.item_id)
+            clusters[record.item_id] = record.cluster
             continue
         kinds.add(isinstance(raw, bool))
         values[record.item_id] = float(raw)

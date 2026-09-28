@@ -161,7 +161,7 @@ def test_exclude_mode_blocks_when_too_many_items_errored() -> None:
     assert reg.status == "block"
     assert result.exit_code == 1
     text = format_gate(result)
-    assert "20 of 40 excluded (candidate 20, baseline 0), over the limit of 2" in text
+    assert "20 candidate-only counted as failures, over the limit of 2" in text
 
 
 def test_exclude_mode_allows_a_few_errors_and_reports_them() -> None:
@@ -169,8 +169,12 @@ def test_exclude_mode_allows_a_few_errors_and_reports_them() -> None:
     cand = [record(f"q{i:02d}", "cand", scores={"correct": True}) for i in range(39)]
     cand.append(record("q39", "cand", scores={}, error="timeout"))
     result = run_gate(base, cand, metrics=[GateMetric("correct")], on_error="exclude", n_boot=200)
-    assert result.regressions[0].status == "pass"
-    assert "1 of 40 excluded (candidate 1, baseline 0), limit 2" in format_gate(result)
+    # The error counts as one failure: a drop, but far from significant.
+    assert result.regressions[0].status == "warn"
+    assert result.exit_code == 0
+    assert "1 of 40 (candidate 1, baseline 0), 1 candidate-only counted as failures, limit 2" in (
+        format_gate(result)
+    )
 
 
 def test_four_of_forty_regressions_warn_with_the_mcnemar_p_value() -> None:
@@ -218,3 +222,56 @@ def test_binary_block_decision_always_matches_the_printed_p_value(clustered: boo
 
 
 ITEMS = [f"q{i:02d}" for i in range(40)]
+
+
+# Re-review finding: errors inside the exclusion limit could turn a block into a pass.
+
+
+def _six_regressions(errored: int, metric: str = "correct", worse: bool = False) -> tuple:
+    """40 items. The candidate regresses on q00-q05, and the first `errored` of those error."""
+    good, bad = (False, True) if worse else (True, False)
+    base = [record(f"q{i:02d}", "base", scores={metric: good}) for i in range(40)]
+    cand = [record(f"q{i:02d}", "cand", scores={}, error="timeout") for i in range(errored)]
+    cand += [record(f"q{i:02d}", "cand", scores={metric: bad}) for i in range(errored, 6)]
+    cand += [record(f"q{i:02d}", "cand", scores={metric: good}) for i in range(6, 40)]
+    return base, cand
+
+
+def test_candidate_errors_count_as_failures_so_they_cannot_hide_a_block() -> None:
+    base, cand = _six_regressions(errored=0)
+    clean = run_gate(base, cand, metrics=[GateMetric("correct")], n_boot=200)
+    assert clean.regressions[0].status == "block"  # 6-0 discordant, p = 0.031
+
+    base, cand = _six_regressions(errored=2)  # 2 of the 6 regressions error instead
+    result = run_gate(base, cand, metrics=[GateMetric("correct")], on_error="exclude", n_boot=200)
+    (reg,) = result.regressions
+    assert reg.status == "block"
+    assert result.exit_code == 1
+    assert reg.result.comparison.pvalue == clean.regressions[0].result.comparison.pvalue
+    assert reg.result.imputed == ("q00", "q01")
+    text = format_gate(result)
+    assert "exact McNemar p=0.031" in text
+    assert "2 of 40 (candidate 2, baseline 0), 2 candidate-only counted as failures" in text
+
+
+def test_candidate_errors_count_as_failures_for_lower_is_better_metrics() -> None:
+    base, cand = _six_regressions(errored=2, metric="leak", worse=True)
+    result = run_gate(
+        base,
+        cand,
+        metrics=[GateMetric("leak", higher_is_better=False)],
+        on_error="exclude",
+        n_boot=200,
+    )
+    assert result.regressions[0].status == "block"
+    assert result.regressions[0].result.comparison.candidate_mean == pytest.approx(6 / 40)
+
+
+def test_items_errored_in_the_baseline_are_still_excluded() -> None:
+    base, cand = _six_regressions(errored=0)
+    base[39] = record("q39", "base", scores={}, error="timeout")
+    result = run_gate(base, cand, metrics=[GateMetric("correct")], on_error="exclude", n_boot=200)
+    (reg,) = result.regressions
+    assert reg.result.excluded == ("q39",)
+    assert reg.result.imputed == ()
+    assert reg.result.comparison.n == 39

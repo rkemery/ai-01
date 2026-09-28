@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -65,8 +65,9 @@ class MetricSummary:
 class RunComparison:
     """Candidate vs baseline on one metric, paired by item_id.
 
-    `excluded` lists items left out because they errored in either run, and
-    `excluded_baseline` / `excluded_candidate` say which run errored.
+    `excluded_baseline` and `excluded_candidate` list the items that errored in
+    each run. `imputed` lists candidate-only errors that were scored as
+    failures (see `compare_runs`), and `excluded` the errored items left out.
     """
 
     metric: str
@@ -78,11 +79,17 @@ class RunComparison:
     excluded: tuple[str, ...]
     excluded_baseline: tuple[str, ...] = ()
     excluded_candidate: tuple[str, ...] = ()
+    imputed: tuple[str, ...] = ()
 
     @property
     def n_items(self) -> int:
         """Items in the runs, paired or excluded."""
         return self.comparison.n + len(self.excluded)
+
+    @property
+    def n_errored(self) -> int:
+        """Items that errored in either run, whether excluded or scored as failures."""
+        return len(self.excluded) + len(self.imputed)
 
 
 def summarize_metric(
@@ -129,6 +136,7 @@ def compare_runs(
     *,
     use_clusters: bool = False,
     on_error: OnError = "raise",
+    candidate_errors_as: float | None = None,
     n_boot: int = 10_000,
     confidence: float = 0.95,
     seed: int = 0,
@@ -137,6 +145,13 @@ def compare_runs(
 
     Both runs must cover the same item_ids. With on_error='exclude', an item
     that errored in either run is dropped from both and listed in `excluded`.
+
+    `candidate_errors_as` (0.0 or 1.0) changes that for pass/fail metrics:
+    an item that errored in the candidate but not in the baseline is scored as
+    that value instead of dropped, and listed in `imputed`. The gate passes
+    the failing value, so an error can only make the candidate look worse and
+    can never turn a block into a pass. It has no effect on numeric metrics,
+    which have no failing value.
 
     Without clusters the CI is a bootstrap over items, and a pass/fail metric
     gets the exact McNemar test. With clusters the CI and p-value come from
@@ -153,6 +168,17 @@ def compare_runs(
     if a.binary != b.binary:
         raise RecordError(f"{metric!r} is binary in one run and numeric in the other")
     _check_same_items(a, b)
+    errored_baseline, errored_candidate = tuple(sorted(a.excluded)), tuple(sorted(b.excluded))
+    imputed: tuple[str, ...] = ()
+    if candidate_errors_as is not None and b.binary:
+        if candidate_errors_as not in (0.0, 1.0):
+            raise ValueError(f"candidate_errors_as must be 0 or 1, got {candidate_errors_as}")
+        imputed = tuple(sorted(set(b.excluded) - set(a.excluded)))
+        b = replace(
+            b,
+            values={**b.values, **dict.fromkeys(imputed, float(candidate_errors_as))},
+            excluded=tuple(i for i in b.excluded if i not in imputed),
+        )
     excluded = tuple(sorted(set(a.excluded) | set(b.excluded)))
     ids = sorted(set(a.values) & set(b.values))
     if len(ids) < 2:
@@ -173,8 +199,9 @@ def compare_runs(
         binary=a.binary,
         mde=_paired_mde(y - x, clusters, comparison),
         excluded=excluded,
-        excluded_baseline=tuple(sorted(a.excluded)),
-        excluded_candidate=tuple(sorted(b.excluded)),
+        excluded_baseline=errored_baseline,
+        excluded_candidate=errored_candidate,
+        imputed=imputed,
     )
 
 
