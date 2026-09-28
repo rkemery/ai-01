@@ -60,8 +60,8 @@ MUST
 - JSONL results contract: one record per item per run, with model, config, scores, tokens, cost, latency.
 - Stats: Wilson intervals for small N, clustered standard errors, paired McNemar and paired bootstrap for comparing runs, an MDE line printed with every result, pass^k for repeated trials.
 - Judge: binary checklist items (not 1 to 5 scales), reference-guided.
-- Calibration: judge TPR and TNR against human labels, Cohen's kappa with a bootstrap CI, bias-corrected pass rate with a CI that includes calibration uncertainty (Lee et al., arXiv 2511.21140). Labels are split: the judge prompt is tuned on dev labels, then frozen before the test labels are scored, so TPR and TNR aren't optimistic.
-- Labeling CLI: blind, randomized, stores labels as JSONL. Uniform random sample for agreement metrics, disagreement sampling only for finding judge bugs.
+- Calibration: judge TPR and TNR against known labels (no labels from the owner, see "No human labeling" below), Cohen's kappa with a bootstrap CI, bias-corrected pass rate with a CI that includes calibration uncertainty (Lee et al., arXiv 2511.21140). Labels are split: the judge prompt is tuned on dev labels, then frozen before the test labels are scored, so TPR and TNR aren't optimistic.
+- Labeling CLI (shipped as a feature for anyone who wants human labels, not used for this portfolio's headline numbers): blind, randomized, stores labels as JSONL. Uniform random sample for agreement metrics, disagreement sampling only for finding judge bugs.
 - Cached model client with a hard dollar cap computed from `usage`, and reasoning tokens logged per call.
 - CI: every PR replays cached responses with fake clients. Live runs only on manual `workflow_dispatch`. Two kinds of block: hard floors that fail on any single violation (a PII leak, a canary leak, an answered unanswerable in the regression suite), and metric regressions that block only when the paired CI says the drop is real.
 
@@ -82,7 +82,7 @@ MUST
 - Generation and judging on the 3 best configs only.
 - Abstention 2x2 table (answerable or not vs answered or abstained), false refusal rate, hallucination rate (answers with at least one unsupported claim).
 - Bootstrap CIs clustered by source article, paired comparisons, MDE line.
-- 50 dev-question answers labeled to tune the judge, then 150 final-config test answers labeled blind by a human, which gives a human-measured headline and validates the frozen judge at the same time.
+- Judge validation without human labels from us, two ways. First, a controlled perturbation set built from the facts file: correct answers plus copies with one injected error each (wrong number, wrong plan, superseded policy, unsupported claim) and faithful paraphrases, so every label is known by construction. Split dev/test, tune the judge prompt on dev, freeze it, report TPR/TNR on test. Second, RAGTruth (MIT, human-annotated hallucinations in real RAG answers) as an outside check on natural errors. The README states the transfer caveat: synthetic errors are easier to catch than natural ones.
 - Stack: LlamaIndex (`llama-index-core` 0.14.x) and Qdrant local mode (`qdrant-client` 1.19.x), fusion method set explicitly.
 
 SHOULD
@@ -121,11 +121,11 @@ MUST
 - Agents that differ in permissions and context, not just prompts. Intake classifies. Researcher retrieves from a frozen snapshot of the RAG index. Resolver writes a typed `ActionPlan` but can't execute it. Compliance reviewer sees only ticket facts, the draft and policy excerpts. Executor applies changes only after approval. Typed Pydantic handoffs, at most 2 bounce-backs.
 - Human-in-the-loop: `interrupt()` in a `human_review` node (approve, edit, reject), `SqliteSaver` checkpointer, idempotent tools keyed on ticket and action, a kill-and-resume demo. In evals, a scripted oracle answers each interrupt from the task's gold labels, so the 200+ arm B runs don't need a person clicking approve.
 - Fake bank backend in SQLite, exposed as tools.
-- 50 tasks, LLM-drafted and human-audited, each with a gold final DB state, a `should_escalate` label and a hidden fact sheet.
+- 50 tasks authored from the facts file, with gold final states computed by the bank simulator from the gold actions and cross-checked by a second model, each with a gold final DB state, a `should_escalate` label and a hidden fact sheet.
 - Three arms on the same tasks: A single agent (same model, tools, docs, step budget), B full graph, C graph without reviewer. k=4 for A and B, k=2 for C.
 - Metrics: final-DB-state success (checked by code), pass^1 and pass^k, escalation precision and recall, policy violations, dollars per resolved ticket, tokens, p50/p95 latency. Bootstrap CIs and McNemar.
 - Pre-registered hypothesis in the README: the graph wins on policy violations, not raw resolution. Report it either way.
-- 40 failures hand-tagged with codes adapted from the MAST taxonomy.
+- Failure categories derived by code from the action diff (missing action, extra action, wrong arguments, wrong escalation, policy violation), no hand tagging.
 
 SHOULD: tools served by an in-repo stdio MCP server (both arms use the same server), an LLM customer simulator for the roughly 20% of tasks that need clarification.
 
@@ -138,12 +138,12 @@ MUST
 - PII benchmark: regex-only vs Presidio, per-entity precision and recall on `gretelai/synthetic_pii_finance_multilingual` (Apache-2.0) and `nvidia/Nemotron-PII` (CC-BY-4.0). Licenses re-checked when the data is pulled.
 - Foundry's default content filter set to annotate-only and logged as its own layer, so the ablation isn't contaminated.
 - Reliability: slowapi rate limits plus a per-key token budget with 429 and Retry-After, an overall `asyncio.timeout` deadline, retries with jitter, a small async circuit breaker tested with a fake clock, fallback luna then gpt-5-mini then a retrieval-only answer then 503. Fault injection tests report the fallback rate.
-- Attack suite of about 150, frozen as JSONL with provenance and license: direct (deepset/prompt-injections, JailbreakBench, Lakera gandalf), indirect (LLMail-Inject payloads planted in KB chunks), about 30 hand-written neobank attacks (the headline number), obfuscated variants, output-handling and consumption attacks. Benign traffic: Banking77 test, the RAG questions, NotInject.
+- Attack suite of about 150, frozen as JSONL with provenance and license: direct (deepset/prompt-injections, JailbreakBench, Lakera gandalf), indirect (LLMail-Inject payloads planted in KB chunks), programmatic transformations of those public payloads (obfuscation, encoding, translation, and embedding them in Tallowbrook help articles for indirect injection), a held-out split as the headline number, output-handling and consumption attacks. Benign traffic: Banking77 test, the RAG questions, NotInject.
 - Thresholds tuned on a dev split, results on held-out only. End-to-end attack success rate judged by code (canary leaked, PII echoed, link emitted), detector TPR at 1% FPR, FPR per benign set, Wilson CIs, added latency per layer, which layer caught each attack.
-- A 1-hour manual adaptive attack session, reported in its own column, with a note that static suites overstate robustness.
+- An automated garak scan against the running gateway as the adaptive column, labeled as an automated scanner rather than a human red team, with a note that static suites overstate robustness.
 - Prometheus metrics, Docker with CPU-only torch, default profile loads only models under about 200M parameters.
 
-SHOULD: OWASP LLM Top 10 (2026) table listing only the rows that have tests, a targeted garak scan.
+SHOULD: OWASP LLM Top 10 (2026) table listing only the rows that have tests.
 
 CUT: MITRE ATLAS mapping, PyRIT, openai/privacy-filter at runtime, Qwen3Guard at runtime, XSTest, LiteLLM.
 
@@ -180,20 +180,19 @@ Compute: about 4 to 10 hours of CPU in the container, 2 to 6 hours on free Colab
 
 Cost guards: in-client dollar cap, Azure budget alerts at $25 and $40, low TPM on every deployment, spending limit left on.
 
-## Human labeling (the user's time)
+## No human labeling
 
-About 22 hours total, about 10 of it pure labeling:
+The owner labels nothing. Every place the plan used human labels now uses one of these, and each README says which:
 
-| Task | Count | Time |
-|---|---|---|
-| Label dev RAG answers to tune the judge | 50 | 1.0 h |
-| Blind-label final RAG test answers (3 yes/no checks each) | 150 | 3.1 h |
-| Relabel a sample a week later (intra-rater check) | 30 | 0.6 h |
-| Pairwise preferences (optional) | 60 | 1.0 h |
-| Review RAG questions and gold article IDs | 200 | 3.3 h |
-| Audit LLM-drafted agent tasks | 50 | 8.3 h |
-| Hand-tag agent failures | 40 | 2.7 h |
-| Hand-written attacks plus adaptive session | 30 | 2.5 h |
+| Was | Now |
+|---|---|
+| Judge calibration against the owner's labels | Perturbation set with labels known by construction (in-domain) plus RAGTruth human annotations (outside check on natural errors) |
+| Owner review of RAG questions and gold IDs | Validator checks against the facts file, a second-model cross-check of every question, and adversarial review |
+| Owner audit of agent tasks | Gold states computed by the bank simulator, second-model cross-check, adversarial review |
+| Hand-tagged agent failures | Failure categories derived by code from action diffs |
+| Hand-written attacks and a manual adaptive session | Public licensed attack sets, programmatic transformations, an automated garak scan |
+
+What this costs in honesty: no result can be called human-validated on our own data. READMEs say "judge-scored, judge validated on synthetic perturbations and RAGTruth" instead.
 
 ## Day 1 results (Azure, 2026-09-28)
 
