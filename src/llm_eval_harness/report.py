@@ -41,7 +41,8 @@ def mde_line(summaries: Sequence[MetricSummary]) -> str:
         mde = s.mde_vs_same_size_run
         parts.append(f"{s.metric} {'n/a' if mde is None else fmt_diff(mde, s.binary).lstrip('+')}")
     return (
-        "MDE against another run of the same size (unpaired, 80% power, alpha 0.05): "
+        "MDE against another run of the same size (unpaired, 80% power, alpha 0.05, "
+        "t quantiles on each CI's df where it has them): "
         + ", ".join(parts)
         + ". A paired comparison on the same items usually detects less."
     )

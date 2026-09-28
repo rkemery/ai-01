@@ -200,7 +200,7 @@ def test_corrected_ci_keeps_calibration_uncertainty_when_observed_tpr_is_1() -> 
     """True TPR 0.9, but the judge passed all 10 human passes in the labeled set.
 
     Resampling within the labeled set gives TPR* = 1 in every replicate, which
-    covered about 74% here. Drawing TPR* and TNR* from Beta posteriors keeps the
+    covered 73 to 77% in larger simulations. Drawing TPR* and TNR* from Beta posteriors keeps the
     uncertainty in the interval.
     """
     rng = np.random.default_rng(3)

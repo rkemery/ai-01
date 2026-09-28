@@ -40,7 +40,9 @@ class MetricSummary:
 
     `se` is the standard error behind the interval (the binomial SE for a
     Wilson interval, the clustered SE floored at the item-level SE when
-    clustered), used for the MDE against another run of the same size.
+    clustered), used for the MDE against another run of the same size. `df`
+    is the interval's degrees of freedom: G - 1 when clustered, n - 1 for an
+    unclustered numeric metric, and None for an unclustered Wilson interval.
     """
 
     metric: str
@@ -49,16 +51,20 @@ class MetricSummary:
     se: float
     binary: bool
     excluded: tuple[str, ...]
+    df: int | None = None
 
     @property
     def mde_vs_same_size_run(self) -> float | None:
         """Unpaired MDE against an independent run with the same n and variance.
 
-        MDE = (z_{1 - alpha/2} + z_{0.8}) * sqrt(2) * SE. For an unclustered
-        pass rate this equals `stats.mde_two_proportions(n, n, p)`. None when
-        SE is 0 (for example a 100% pass rate), where the formula says nothing.
+        MDE = (q_{1 - alpha/2} + q_{0.8}) * sqrt(2) * SE, with t quantiles on
+        `df` degrees of freedom when the interval has them (so a clustered MDE
+        uses the same G - 1 df as its CI), else z quantiles. For an
+        unclustered pass rate this equals `stats.mde_two_proportions(n, n, p)`.
+        None when SE is 0 (for example a 100% pass rate), where the formula
+        says nothing.
         """
-        return None if self.se == 0 else mde_from_se(math.sqrt(2.0) * self.se)
+        return None if self.se == 0 else mde_from_se(math.sqrt(2.0) * self.se, df=self.df)
 
 
 @dataclass(frozen=True)
@@ -109,16 +115,20 @@ def summarize_metric(
     column = metric_column(records, metric, on_error=on_error)
     values = np.fromiter(column.values.values(), dtype=np.float64)
     clusters = _cluster_list(column, list(column.values)) if use_clusters else None
+    df: int | None
     if column.binary and clusters is None:
         interval = wilson_interval(int(values.sum()), values.size, confidence)
         p = interval.estimate
-        se = math.sqrt(p * (1.0 - p) / values.size)
+        se, df = math.sqrt(p * (1.0 - p) / values.size), None
     elif column.binary:
         interval = wilson_interval_clustered(values, clusters, confidence)
-        se = clustered_se_floored(values, clusters)
+        se, df = clustered_se_floored(values, clusters), n_clusters(clusters) - 1
+    elif clusters is None:
+        interval = mean_ci(values, None, confidence)
+        se, df = clustered_se(values), values.size - 1
     else:
         interval = mean_ci(values, clusters, confidence)
-        se = clustered_se(values) if clusters is None else clustered_se_floored(values, clusters)
+        se, df = clustered_se_floored(values, clusters), n_clusters(clusters) - 1
     return MetricSummary(
         metric=metric,
         run_id=column.run_id,
@@ -126,6 +136,7 @@ def summarize_metric(
         se=se,
         binary=column.binary,
         excluded=column.excluded,
+        df=df,
     )
 
 

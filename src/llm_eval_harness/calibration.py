@@ -218,8 +218,9 @@ def corrected_pass_rate(
     Posterior draws instead of resampling the labeled pairs matter when the
     observed TPR or TNR is 0 or 1. Resampling then gives TPR* = 1 in every
     replicate, as if the judge were known to be perfect. With 10 human passes
-    all passed by a judge whose true TPR was 0.9, that interval covered about
-    75%, and the Beta version about 97% (`tests/test_calibration.py`).
+    all passed by a judge whose true TPR was 0.9, that interval covered 73 to
+    77% in 1000- to 2000-run simulations, and the Beta version about 97%
+    (`tests/test_calibration.py` checks at least 93%).
     """
     test = _as_bools(test_judge, "test_judge")
     agreement = confusion(calibration_judge, calibration_human)

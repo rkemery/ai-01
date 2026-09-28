@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
 from helpers import record, run
+from scipy import stats as sps
 
 from llm_eval_harness.analysis import compare_runs, pass_k_from_records, summarize_metric
 from llm_eval_harness.report import (
@@ -76,3 +78,18 @@ def test_replace_section(tmp_path: Path) -> None:
     path.write_text(text)
     assert write_section(path, "demo", "new")
     assert not write_section(path, "demo", "new")
+
+
+def test_mde_uses_the_same_t_df_as_the_ci() -> None:
+    """Re-review finding: the clustered unpaired MDE used z (27.9 pts) where t_7 gives 32.5."""
+    clusters = {f"q{i}": f"c{i % 8}" for i in range(40)}
+    records = run("r", {f"q{i}": (i * 7) % 5 != 0 for i in range(40)}, clusters=clusters)
+    summary = summarize_metric(records, "correct", use_clusters=True)
+    t_sum = sps.t.ppf(0.975, 7) + sps.t.ppf(0.8, 7)
+    assert summary.df == 7
+    assert summary.mde_vs_same_size_run == pytest.approx(t_sum * math.sqrt(2) * summary.se)
+    latency = run("r", {f"q{i}": float(i) for i in range(40)}, metric="latency_ms_custom")
+    numeric = summarize_metric(latency, "latency_ms_custom")
+    assert numeric.df == 39
+    binary = summarize_metric(run("r", {f"q{i}": i < 28 for i in range(40)}), "correct")
+    assert binary.df is None  # Wilson: the z-based two-proportion MDE

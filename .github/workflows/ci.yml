@@ -1,7 +1,9 @@
 name: ci
 
 on:
+  # Pushes to PR branches are covered by pull_request, so each PR runs once.
   push:
+    branches: [main]
   pull_request:
 
 permissions:
