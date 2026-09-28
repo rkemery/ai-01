@@ -11,6 +11,9 @@ Budget: $0 cash. LLM calls are paid from Visual Studio monthly Azure credits (sp
 | Azure subscription | Visual Studio Enterprise (`5a9defb5-…`), $150/month credit, spending limit On, offer type MSDN. A second subscription ("Azure subscription 1") exists on the account and is not used. |
 | Resource group | `rg-ai-portfolio`, East US 2, `Microsoft.CognitiveServices` registered |
 | Service principal | `sp-ai-portfolio`, Contributor + Cognitive Services OpenAI User + Cognitive Services User, all scoped to `rg-ai-portfolio` only. Secret valid 1 year. |
+| Quota tier | Tier 3 |
+| Foundry resource | `rkemery-ai-portfolio` (AIServices, S0, East US 2), OpenAI v1 endpoint `https://rkemery-ai-portfolio.openai.azure.com/openai/v1/` |
+| Deployments (Global Standard, capacity in K TPM) | `gpt-6-luna` 20, `gpt-6-sol` 10, `gpt-5-mini` 20, `Llama-3.3-70B-Instruct` 10. `DeepSeek-V4-Flash` failed: 0 quota. |
 | Session secrets | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `HF_TOKEN` set in the environment settings (picked up by new sessions). The HF token pasted in chat was revoked. |
 | Repos | `ai-01` to be renamed `llm-eval-harness`. `rag-support-assistant`, `banking77-lora-vs-frontier`, `support-triage-agents`, `guarded-llm-gateway` to be created by the owner (the Claude GitHub App can't create repos), then added to the app's installation. |
 
@@ -22,13 +25,13 @@ Budget: $0 cash. LLM calls are paid from Visual Studio monthly Azure credits (sp
 |---|---|---|---|
 | RAG answers, agents, zero-shot baseline | `gpt-6-luna` | 0.10 / 0.01 / 0.50 | Reasoning effort none or low. Keep prompts in the short-context band (threshold checked on day 1). |
 | Frontier comparison (Banking77, run once) | `gpt-6-sol` | 2.00 / 0.20 / 10.00 | Full 3,080 test set, retrieved few-shot, cached prefix. Reasoning effort none (or the lowest Sol accepts) and a small `max_output_tokens` cap. Every 200 hidden reasoning tokens per call would add about $6. |
-| Judge (cross-family) | `DeepSeek-V4-Flash` (GA, pinned, not `-0731`) | 0.19 / 0.028 / 0.51 | Thinking can't be turned off on Foundry, so its cost per call is unknown until measured. Billed under "Azure Deepseek Models". Day 1: confirm credit drawdown and run a 30-call pilot that logs reasoning tokens. |
-| Fallback judge, gateway fallback, quota contingency | `gpt-5-mini` | 0.25 / 0.025 / 2.00 | Azure OpenAI line, listed even at the lowest quota tier. Same vendor as luna, so the README discloses it when it judges. |
-| Second contingency | `gpt-5.4-mini` | 0.75 / 0.075 / 4.50 | Only if both of the above fail the day-1 smoke test. |
+| Judge (cross-family) | `Llama-3.3-70B-Instruct` (version 9) | 0.71 / n/a / 0.71 | Non-reasoning, so cost per call is predictable, and supports `temperature=0`. Chosen on day 1 because DeepSeek-V4-Flash and Grok have 0 quota on this subscription. Confirm in Cost Management that it draws down credits. |
+| Second judge, gateway fallback | `gpt-5-mini` | 0.25 / 0.025 / 2.00 | Azure OpenAI line. Same vendor as luna, so running both judges on the same outputs doubles as the same-family vs cross-family comparison. |
+| Contingency | `gpt-5.4-mini` | 0.75 / 0.075 / 4.50 | Deployable here but not deployed. Only if luna or gpt-5-mini gets refused later. |
 
 Not used: gpt-4.1-mini/nano, gpt-4o-mini (deprecated for new deployments), `gpt-6-astra` (too expensive for the signal), Marketplace models such as Claude (not credit-eligible), Batch API (GPT-6 has no batch meters, and credit subscriptions get little or no batch quota on the older models, so prompt caching replaces it).
 
-Client: `openai` SDK against the Foundry `/openai/v1/` endpoint, Entra ID via `azure-identity` (`get_bearer_token_provider`). Responses API for OpenAI models. For DeepSeek, use whichever of Responses or Chat Completions the day-1 smoke test shows working. SDK `max_retries=0`, our own retry policy.
+Client: `openai` SDK against the Foundry `/openai/v1/` endpoint, Entra ID via `azure-identity` (`get_bearer_token_provider`). Responses API for all four deployments (the day-1 smoke test confirmed it works for Llama too). SDK `max_retries=0`, our own retry policy.
 
 ### Open models (Hugging Face, Apache-2.0 or MIT unless noted, CPU unless noted)
 
@@ -170,7 +173,7 @@ Estimates from the fit review (list prices, 30 to 90% cache hits, gpt-5-mini as 
 Fits a $50/month credit with margin. If the quota tier forces everything onto gpt-5-mini, a final run is $28 to $49, so Ragas and pairwise judging get cut and agents drop to k=2.
 
 Not in these numbers yet, measured on day 1 or during the build:
-- DeepSeek-V4-Flash as judge. It is cheaper per token than gpt-5-mini, but its thinking can't be turned off, so it costs more per call once it reasons past a few hundred tokens. The pilot decides whether it stays.
+- The Llama 3.3 70B judge. A binary checklist call is about 1,500 tokens in and 50 out, roughly $0.001 per call, about the same as gpt-5-mini once its reasoning tokens are counted, so the totals above should hold.
 - LLM calls to draft the corpus, questions and agent tasks, the contextual-retrieval cell, and the customer simulator. Expected to be small on luna, but uncounted.
 
 Compute: about 4 to 10 hours of CPU in the container, 2 to 6 hours on free Colab.
@@ -192,14 +195,14 @@ About 22 hours total, about 10 of it pure labeling:
 | Hand-tag agent failures | 40 | 2.7 h |
 | Hand-written attacks plus adaptive session | 30 | 2.5 h |
 
-## Day 1 checklist (Azure)
+## Day 1 results (Azure, 2026-09-28)
 
-1. Check the subscription's quota tier (`quotaTiers` API).
-2. Deploy and smoke-test luna, sol, gpt-5-mini and DeepSeek-V4-Flash at low TPM. Note which API (Responses or Chat Completions) works for DeepSeek.
-3. Run a 30-call DeepSeek judge pilot that logs reasoning tokens. After 24 hours, confirm in Cost Management that its usage drew down credits. If it didn't, or it costs more per call than gpt-5-mini, gpt-5-mini becomes the judge and the README discloses the same-vendor judge.
-4. Find the lowest reasoning effort sol accepts, and test whether luna accepts `temperature` and `logprobs` (the docs conflict).
-5. Find luna's long-context price threshold before running the full-context RAG row.
-6. Set budget alerts.
+1. Quota tier: Tier 3.
+2. Smoke test (one tiny call each, $0.00027 total): luna works on the Responses API with effort `none`. sol works with effort `none` (0 reasoning tokens) and `low`, and rejects `minimal`. gpt-5-mini works with effort `minimal`. Llama 3.3 70B works on both Responses and Chat Completions.
+3. luna rejects `temperature=0` (only the default 1) and `logprobs`, so the Banking77 API arms can't report calibration. Calibration stays a local-model metric.
+4. DeepSeek-V4-Flash and every Grok model have 0 quota here, so the cross-family judge is Llama 3.3 70B.
+
+Still open: confirm credit drawdown for Llama in Cost Management after 24 hours, find luna's long-context price threshold before the full-context RAG row, and set budget alerts (needs an alert email, so the owner sets these).
 
 ## Build order
 
