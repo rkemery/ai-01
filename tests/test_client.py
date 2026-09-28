@@ -297,3 +297,30 @@ def test_dollar_cap_never_passes_the_cap_even_in_the_worst_case() -> None:
     assert cap.spent_usd <= 1.0
     assert cap.spent_usd > 1.0 - worst  # it stops only when one more call might not fit
     assert cap.spent_usd == pytest.approx(len(inner.calls) * worst)
+
+
+def test_dollar_cap_charges_the_worst_case_for_calls_that_raise() -> None:
+    """Re-review finding: 20 retried timeouts under a $0.01 cap left spend at $0.
+
+    A timed-out request may still be billed in full, so each attempt that raises
+    is charged its reservation, and retries stop when the next one might not fit.
+    """
+    attempts = {"n": 0}
+
+    def timeout(request: ModelRequest) -> str:
+        attempts["n"] += 1
+        raise TimeoutError("the server may still bill this")
+
+    request = req(model="gpt-6-sol", max_output_tokens=400)
+    worst = max_cost_usd(DEFAULT_PRICES["gpt-6-sol"], request)
+    cap = DollarCap(FakeClient(timeout), cap_usd=0.01)
+    client = RetryingClient(cap, (TimeoutError,), max_attempts=4, sleep=lambda s: None)
+    fits = int(0.01 // worst)
+    assert fits == 2
+    # Attempts 1 and 2 time out and are retried. Attempt 3 might not fit, so it is refused.
+    with pytest.raises(BudgetExceeded):
+        client.complete(request)
+    assert attempts["n"] == fits
+    assert cap.spent_usd == pytest.approx(fits * worst)
+    assert cap.charged_for_errors_usd == pytest.approx(fits * worst)
+    assert cap.spent_usd <= 0.01

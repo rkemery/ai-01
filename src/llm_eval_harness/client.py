@@ -309,6 +309,13 @@ class DollarCap:
     request without max_output_tokens, or for a model missing from the price
     table, is refused before any call. Replies served from the disk cache cost
     nothing. Not thread-safe: share one instance per thread, or add a lock.
+
+    A call that raises (a timeout, a dropped connection, a server error) is
+    charged its full worst case before the exception propagates. The provider
+    may have billed it in full and gives no usage to say otherwise. This
+    over-counts attempts that were never billed, such as rate-limit refusals,
+    which only makes the cap stricter. `charged_for_errors_usd` shows how much
+    of `spent_usd` came from such charges.
     """
 
     def __init__(
@@ -323,7 +330,9 @@ class DollarCap:
         self.cap_usd = cap_usd
         self.prices = dict(DEFAULT_PRICES if prices is None else prices)
         self.spent_usd = 0.0
+        self.charged_for_errors_usd = 0.0
         self.calls = 0
+        self.failed_calls = 0
 
     def price_for(self, model: str) -> Price:
         try:
@@ -341,7 +350,14 @@ class DollarCap:
                 f"spent ${self.spent_usd:.4f} of the ${self.cap_usd:.2f} cap, and a call to "
                 f"{request.model!r} could cost up to ${worst:.4f}. Refusing it."
             )
-        response = self._inner.complete(request)
+        try:
+            response = self._inner.complete(request)
+        except Exception:
+            # Charge the reservation, then let the error propagate unchanged.
+            self.failed_calls += 1
+            self.spent_usd += worst
+            self.charged_for_errors_usd += worst
+            raise
         self.calls += 1
         if not response.from_cache:
             self.spent_usd += cost_usd(price, response)
