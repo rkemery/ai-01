@@ -27,7 +27,7 @@ def test_stats_prints_table_mde_and_comparison(
     assert code == 0
     assert "| correct | 80.0% |" in out
     assert "MDE against another run" in out
-    assert "McNemar p" in out
+    assert "p from the exact McNemar test" in out
 
 
 def test_stats_pass_k(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

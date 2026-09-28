@@ -21,6 +21,7 @@ from llm_eval_harness.labeling import read_labels
 from llm_eval_harness.records import metric_column, read_records
 from llm_eval_harness.report import (
     agreement_table,
+    comparison_methods_line,
     comparison_table,
     corrected_table,
     mde_line,
@@ -119,9 +120,11 @@ def run_demo(data_dir: str | Path = DEFAULT_DATA_DIR) -> str:
         f"Simulated cost of the candidate run at {candidate[0].model} list prices: "
         f"${sum(r.cost_usd for r in candidate):.4f} for {len(candidate)} answers.",
         "",
-        "**Candidate vs baseline**, paired by item, bootstrap resampling articles.",
+        "**Candidate vs baseline**, paired by item, clustered by article.",
         "",
         comparison_table(comparisons),
+        "",
+        comparison_methods_line(comparisons),
         "",
         "**Baseline pass rate corrected for judge error** (Rogan-Gladen, CI includes "
         "calibration uncertainty).",

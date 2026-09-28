@@ -7,6 +7,7 @@ from helpers import record, run
 
 from llm_eval_harness.analysis import compare_runs, pass_k_from_records, summarize_metric
 from llm_eval_harness.report import (
+    comparison_methods_line,
     comparison_table,
     mde_line,
     replace_section,
@@ -33,14 +34,16 @@ def test_mde_is_na_for_zero_variance() -> None:
     assert "correct n/a" in mde_line([summary])
 
 
-def test_comparison_table_has_mcnemar_and_mde() -> None:
+def test_comparison_table_has_p_value_method_and_mde() -> None:
     base = run("b", {f"q{i}": i % 2 == 0 for i in range(20)})
     cand = run("c", {f"q{i}": i % 4 != 3 for i in range(20)})
     result = compare_runs(base, cand, "correct", n_boot=500)
     table = comparison_table([result])
     assert "| correct | 50.0% | 75.0% | +25.0 pts |" in table
     assert result.comparison.mcnemar is not None
-    assert f"{result.comparison.mcnemar.pvalue:.3f}" in table
+    assert result.comparison.pvalue == result.comparison.mcnemar.pvalue
+    assert f"{result.comparison.pvalue:.3f}" in table
+    assert "p from the exact McNemar test" in comparison_methods_line([result])
 
 
 def test_pass_k_from_records_uses_each_run_as_a_trial() -> None:

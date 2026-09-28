@@ -66,13 +66,13 @@ def methods_line(summaries: Sequence[MetricSummary]) -> str:
 
 def comparison_table(results: Sequence[RunComparison]) -> str:
     rows = [
-        "| Metric | Baseline | Candidate | Diff | 95% CI | McNemar p | MDE | n |",
+        "| Metric | Baseline | Candidate | Diff | 95% CI | p | MDE | n |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         c = r.comparison
         b = r.binary
-        pvalue = "n/a" if c.mcnemar is None else f"{c.mcnemar.pvalue:.3f}"
+        pvalue = "n/a" if c.pvalue is None else f"{c.pvalue:.3f}"
         mde = "n/a" if r.mde is None else fmt_diff(r.mde, b).lstrip("+")
         rows.append(
             f"| {r.metric} | {fmt_value(c.baseline_mean, b)} | {fmt_value(c.candidate_mean, b)} | "
@@ -80,6 +80,20 @@ def comparison_table(results: Sequence[RunComparison]) -> str:
             f"{pvalue} | {mde} | {c.n} |"
         )
     return "\n".join(rows)
+
+
+def comparison_methods_line(results: Sequence[RunComparison]) -> str:
+    """Which CI method and test each comparison used."""
+    by_method: dict[str, list[str]] = {}
+    for r in results:
+        c = r.comparison
+        test = "no p-value" if c.test is None else f"p from the {c.test}"
+        by_method.setdefault(f"CI from {c.method}, {test}", []).append(r.metric)
+    return (
+        "Method: "
+        + ". ".join(f"{method}, for {', '.join(metrics)}" for method, metrics in by_method.items())
+        + "."
+    )
 
 
 def agreement_table(agreements: Sequence[tuple[str, JudgeAgreement]]) -> str:

@@ -48,16 +48,17 @@ def test_clustered_se_with_singleton_clusters_is_ordinary_se() -> None:
     assert stats.clustered_se(x, none_labels) == pytest.approx(sps.sem(x), rel=1e-12)
 
 
-def test_clustered_se_matches_the_pairwise_formula() -> None:
+def test_clustered_se_is_cr1() -> None:
+    """CR1: G / (G - 1) times the sandwich sum of every within-cluster pair, over n^2."""
     rng = np.random.default_rng(3)
     x = rng.normal(size=12)
     clusters = ["a"] * 4 + ["b"] * 3 + ["c"] * 5
-    n = x.size
+    n, g = x.size, 3
     d = x - x.mean()
-    cross = sum(
-        d[i] * d[j] for i, j in itertools.permutations(range(n), 2) if clusters[i] == clusters[j]
+    same = sum(
+        d[i] * d[j] for i, j in itertools.product(range(n), repeat=2) if clusters[i] == clusters[j]
     )
-    expected = math.sqrt(np.var(x, ddof=1) / n + cross / n**2)
+    expected = math.sqrt(g / (g - 1) * same) / n
     assert stats.clustered_se(x, clusters) == pytest.approx(expected, rel=1e-12)
 
 
@@ -73,12 +74,23 @@ def test_clustered_se_needs_two_clusters() -> None:
         stats.clustered_se([1.0, 0.0, 1.0], ["a", "a", "a"])
 
 
-def test_mean_ci_is_symmetric_normal_interval() -> None:
+def test_mean_ci_is_a_t_interval() -> None:
     x = np.array([0.2, 0.4, 0.9, 0.5, 0.7])
     interval = stats.mean_ci(x)
-    half = sps.norm.ppf(0.975) * sps.sem(x)
+    half = sps.t.ppf(0.975, 4) * sps.sem(x)
     assert interval.low == pytest.approx(x.mean() - half)
     assert interval.high == pytest.approx(x.mean() + half)
+
+
+def test_clustered_mean_ci_uses_cr1_and_t_with_g_minus_1_df() -> None:
+    rng = np.random.default_rng(6)
+    labels = np.repeat(list("abcdefgh"), 5).tolist()
+    x = rng.normal(size=8)[np.repeat(np.arange(8), 5)] + rng.normal(size=40)
+    se = stats.clustered_se_floored(x, labels)
+    assert se == stats.clustered_se(x, labels)  # strongly clustered, so the floor is inactive
+    interval = stats.mean_ci(x, labels)
+    assert interval.high == pytest.approx(x.mean() + sps.t.ppf(0.975, 7) * se)
+    assert "8 clusters, 7 df" in interval.method
 
 
 def test_design_effect_is_one_without_variance_and_at_least_one() -> None:
@@ -88,18 +100,27 @@ def test_design_effect_is_one_without_variance_and_at_least_one() -> None:
     assert stats.design_effect(x, [f"c{i % 8}" for i in range(40)]) >= 1.0
 
 
-def test_clustered_wilson_reduces_to_wilson_for_singletons() -> None:
+def _wilson(p: float, n: float, z: float) -> tuple[float, float]:
+    center = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z / (1 + z * z / n) * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return center - half, center + half
+
+
+def test_clustered_wilson_uses_korn_graubard_effective_n() -> None:
+    # Singleton clusters: design effect 1, so only the df adjustment (z / t_{G-1})^2 remains.
     x = np.array([1, 1, 0, 1, 0, 1, 1, 1, 0, 1], dtype=float)
     ours = stats.wilson_interval_clustered(x, [str(i) for i in range(x.size)])
-    plain = stats.wilson_interval(int(x.sum()), x.size)
-    assert ours.low == pytest.approx(plain.low, rel=1e-9)
-    assert ours.high == pytest.approx(plain.high, rel=1e-9)
+    z, t = sps.norm.ppf(0.975), sps.t.ppf(0.975, 9)
+    low, high = _wilson(0.7, 10 * (z / t) ** 2, z)
+    assert (ours.low, ours.high) == (pytest.approx(low), pytest.approx(high))
+    assert "Korn-Graubard" in ours.method
 
 
 def test_clustered_wilson_stays_open_at_zero() -> None:
     interval = stats.wilson_interval_clustered([0.0] * 40, [f"c{i % 8}" for i in range(40)])
     assert interval.low == 0.0
-    assert interval.high == pytest.approx(stats.wilson_interval(0, 40).high)
+    # No failures means no evidence about clustering (deff = 1), but only 7 df.
+    assert stats.wilson_interval(0, 40).high < interval.high < 0.15
 
 
 def test_clustered_wilson_is_wider_when_clusters_matter() -> None:
@@ -145,40 +166,26 @@ def test_paired_bootstrap_is_seeded_and_centered() -> None:
     assert first.mcnemar is not None
 
 
-def test_paired_bootstrap_cluster_resampling_widens_ci() -> None:
-    # Differences are identical within each cluster, so resampling items overstates precision.
+def test_clustered_paired_comparison_widens_ci_and_matches_its_p_value() -> None:
+    # Differences are identical within each cluster, so treating items as independent
+    # overstates precision.
     d = np.repeat([1, 0, 0, 1, -1, 1, 0, 1], 6).astype(float)
     clusters = np.repeat(list("abcdefgh"), 6).tolist()
     base = np.zeros_like(d)
-    items = stats.paired_bootstrap(base, d, n_boot=4000, seed=0)
-    grouped = stats.paired_bootstrap(base, d, clusters, n_boot=4000, seed=0)
+    items = stats.paired_comparison(base, d, n_boot=4000, seed=0)
+    grouped = stats.paired_comparison(base, d, clusters)
     assert grouped.high - grouped.low > 1.5 * (items.high - items.low)
     assert grouped.n_clusters == 8
-    assert grouped.mcnemar is None  # the differences include -1, so not binary pairs of 0/1
+    assert (grouped.test, grouped.df, grouped.mcnemar) == ("clustered t-test", 7, None)
+    se = stats.clustered_se(d, clusters)
+    assert grouped.pvalue == pytest.approx(2 * sps.t.sf(d.mean() / se, 7))
+    assert (grouped.low > 0) == (grouped.pvalue < 0.05)
 
 
 def test_bootstrap_means_handles_partial_chunks() -> None:
     reps = stats.bootstrap_means(np.arange(10.0), n_boot=2_345, seed=1)
     assert reps.shape == (2_345,)
     assert np.all((reps >= 0) & (reps <= 9))
-
-
-def test_mde_paired_binary_known_value() -> None:
-    expected = (sps.norm.ppf(0.975) + sps.norm.ppf(0.8)) * math.sqrt(0.2 / 150)
-    assert stats.mde_paired_binary(150, 0.2) == pytest.approx(expected)
-    assert stats.mde_paired_binary(150, 0.2) == pytest.approx(0.1023, abs=1e-4)
-
-
-def test_mde_paired_binary_is_conservative_vs_connor() -> None:
-    # Solve Connor (1987) exactly: delta sqrt(n) = z_a sqrt(p_d) + z_b sqrt(p_d - delta^2).
-    n, p_d = 100, 0.3
-    z_a, z_b = sps.norm.ppf(0.975), sps.norm.ppf(0.8)
-    exact = next(
-        delta
-        for delta in np.linspace(0.001, p_d, 100_000)
-        if delta * math.sqrt(n) >= z_a * math.sqrt(p_d) + z_b * math.sqrt(p_d - delta**2)
-    )
-    assert exact <= stats.mde_paired_binary(n, p_d) <= exact * 1.05
 
 
 def test_mde_two_proportions_known_value() -> None:
@@ -191,12 +198,13 @@ def test_mde_two_proportions_known_value() -> None:
     [
         (stats.mde_paired_binary, (0, 0.2)),
         (stats.mde_paired_binary, (10, 0.0)),
+        (stats.mcnemar_exact_power, (10, 0.2, 0.3)),
         (stats.mde_two_proportions, (0, 10, 0.5)),
         (stats.mde_two_proportions, (10, 10, 1.5)),
     ],
 )
 def test_mde_rejects_bad_inputs(fn: Callable[..., float], args: tuple[float, ...]) -> None:
-    with pytest.raises(ValueError, match="must be"):
+    with pytest.raises(ValueError, match=r"must be|cannot exceed"):
         fn(*args)
 
 
@@ -233,3 +241,96 @@ def test_pass_k_rejects_bad_counts(n: int, c: int, k: int) -> None:
 def test_percentile_interval_rejects_all_nan() -> None:
     with pytest.raises(ValueError, match="NaN"):
         stats.percentile_interval([np.nan, np.nan], 0.5, 2)
+
+
+# Review findings: the paired MDE must be attainable and match the exact McNemar test.
+
+
+@pytest.mark.parametrize(
+    ("n", "p_d"), [(40, 0.15), (30, 0.1), (20, 0.05), (39, 0.282), (100, 0.2), (10, 0.1)]
+)
+def test_mde_paired_binary_never_exceeds_the_discordant_rate(n: int, p_d: float) -> None:
+    mde = stats.mde_paired_binary(n, p_d)
+    assert mde is None or 0 < mde <= p_d
+
+
+def test_mcnemar_exact_power_matches_enumeration() -> None:
+    """Brute force over every (baseline-only, candidate-only) count at n = 20."""
+    n = 20
+    for p_d, diff in [(0.3, 0.1), (0.5, 0.3), (0.2, -0.2), (0.4, 0.0)]:
+        p_a, p_b = (p_d - diff) / 2, (p_d + diff) / 2
+        expected = 0.0
+        for a in range(n + 1):
+            for b in range(n + 1 - a):
+                prob = sps.multinomial.pmf([a, b, n - a - b], n, [p_a, p_b, 1 - p_d])
+                pvalue = 1.0 if a + b == 0 else sps.binomtest(a, a + b, 0.5).pvalue
+                expected += prob * (pvalue < 0.05)
+        assert stats.mcnemar_exact_power(n, p_d, diff) == pytest.approx(expected, abs=1e-9)
+
+
+@pytest.mark.parametrize(("n", "p_d"), [(40, 0.3), (39, 0.282), (100, 0.2)])
+def test_paired_binary_mde_has_80_percent_power_by_simulation(n: int, p_d: float) -> None:
+    """At the MDE, `mcnemar_exact` rejects about 80% of the time, and just below it less."""
+    mde = stats.mde_paired_binary(n, p_d)
+    assert mde is not None
+    assert stats.mcnemar_exact_power(n, p_d, mde) >= 0.8
+    assert stats.mcnemar_exact_power(n, p_d, mde - 0.005) < 0.8
+    rng = np.random.default_rng(n)
+    p_a = (p_d - mde) / 2
+    reps, rejections = 3000, 0
+    for _ in range(reps):
+        u = rng.uniform(size=n)
+        both = u >= p_d + (1 - p_d) / 2  # half of the concordant pairs pass in both runs
+        a = (u < p_a) | both
+        b = ((u >= p_a) & (u < p_d)) | both
+        rejections += stats.mcnemar_exact(a, b).pvalue < 0.05
+    assert rejections / reps == pytest.approx(0.8, abs=0.03)
+
+
+# Review findings: few-cluster intervals and the paired clustered path.
+
+
+def _labels(g: int, m: int) -> list[str]:
+    return np.repeat(np.arange(g), m).astype(str).tolist()
+
+
+def test_few_cluster_intervals_cover_at_eight_clusters() -> None:
+    """95% intervals at 8 clusters of 5 items (the demo's shape) should cover >= 93%."""
+    rng = np.random.default_rng(2026)
+    g, m, reps = 8, 5, 1000
+    labels = _labels(g, m)
+    member = np.repeat(np.arange(g), m)
+    beta_a, beta_b = 0.8 * 4, 0.2 * 4  # pass rate 0.8, intra-cluster correlation 0.2
+    hits = {"mean": 0, "wilson": 0, "paired": 0}
+    for _ in range(reps):
+        x = rng.normal(0, math.sqrt(0.3), g)[member] + rng.normal(0, math.sqrt(0.7), g * m)
+        ci = stats.mean_ci(x, labels)
+        hits["mean"] += ci.low <= 0 <= ci.high
+
+        p = rng.beta(beta_a, beta_b, g)[member]
+        y = (rng.uniform(size=g * m) < p).astype(float)
+        ci = stats.wilson_interval_clustered(y, labels)
+        hits["wilson"] += ci.low <= 0.8 <= ci.high
+
+        # Paired pass/fail with a cluster-level effect of the change that averages to 0.
+        logit = rng.normal(0, 1, g)[member] + rng.normal(0, 0.5, g * m)
+        shift = rng.normal(0, 1, g)[member]
+        base = rng.uniform(size=g * m) < 1 / (1 + np.exp(-logit))
+        cand = rng.uniform(size=g * m) < 1 / (1 + np.exp(-(logit + shift)))
+        pc = stats.paired_comparison(base, cand, labels)
+        hits["paired"] += pc.low <= 0 <= pc.high
+    coverage = {k: v / reps for k, v in hits.items()}
+    assert all(c >= 0.93 for c in coverage.values()), coverage
+
+
+def test_clustering_never_narrows_the_paired_interval() -> None:
+    # Within each cluster one item improves and one regresses, so the clustered SE is
+    # smaller than the item-level SE. The design effect is floored at 1, as for Wilson.
+    base = np.array([1, 0, 1, 1] * 8, dtype=float)
+    cand = np.array([0, 1, 1, 1] * 8, dtype=float)
+    cand[:2] = 1
+    labels = _labels(8, 4)
+    assert stats.clustered_se(cand - base, labels) < stats.clustered_se(cand - base)
+    grouped = stats.paired_comparison(base, cand, labels)
+    items = stats.paired_comparison(base, cand, n_boot=4000)
+    assert grouped.high - grouped.low >= items.high - items.low

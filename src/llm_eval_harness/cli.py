@@ -31,6 +31,7 @@ from llm_eval_harness.labeling import (
 from llm_eval_harness.records import EvalRecord, metric_column, read_records, single_run_id
 from llm_eval_harness.report import (
     agreement_table,
+    comparison_methods_line,
     comparison_table,
     corrected_table,
     mde_line,
@@ -158,6 +159,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print(f"Paired: {args.results} minus {args.compare}")
         print()
         print(comparison_table(comparisons))
+        print()
+        print(comparison_methods_line(comparisons))
     return 0
 
 

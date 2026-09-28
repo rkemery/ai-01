@@ -21,10 +21,12 @@ from llm_eval_harness.stats import (
     PairedComparison,
     PassKResult,
     clustered_se,
+    clustered_se_floored,
     mde_from_se,
     mde_paired_binary,
     mean_ci,
-    paired_bootstrap,
+    n_clusters,
+    paired_comparison,
     pass_k,
     wilson_interval,
     wilson_interval_clustered,
@@ -36,7 +38,8 @@ class MetricSummary:
     """One metric from one run with its CI.
 
     `se` is the standard error behind the interval (the binomial SE for a
-    Wilson interval), used for the MDE against another run of the same size.
+    Wilson interval, the clustered SE floored at the item-level SE when
+    clustered), used for the MDE against another run of the same size.
     """
 
     metric: str
@@ -80,8 +83,9 @@ def summarize_metric(
 ) -> MetricSummary:
     """Point estimate and CI for one metric of one run.
 
-    Pass rates get a Wilson interval, with the design-effect sample size when
-    clustered. Continuous metrics get mean +/- z * SE with Miller's clustered SE.
+    Pass rates get a Wilson interval, with the Korn-Graubard effective sample
+    size when clustered. Continuous metrics get a t interval, with the CR1
+    clustered SE and G - 1 degrees of freedom when clustered.
     """
     column = metric_column(records, metric, on_error=on_error)
     values = np.fromiter(column.values.values(), dtype=np.float64)
@@ -92,10 +96,10 @@ def summarize_metric(
         se = math.sqrt(p * (1.0 - p) / values.size)
     elif column.binary:
         interval = wilson_interval_clustered(values, clusters, confidence)
-        se = clustered_se(values, clusters)
+        se = clustered_se_floored(values, clusters)
     else:
         interval = mean_ci(values, clusters, confidence)
-        se = clustered_se(values, clusters)
+        se = clustered_se(values) if clusters is None else clustered_se_floored(values, clusters)
     return MetricSummary(
         metric=metric,
         run_id=column.run_id,
@@ -122,9 +126,15 @@ def compare_runs(
     Both runs must cover the same item_ids. With on_error='exclude', an item
     that errored in either run is dropped from both and listed in `excluded`.
 
-    The MDE uses `mde_paired_binary` at the observed discordant rate for an
-    unclustered pass rate, and (z_{1 - alpha/2} + z_{0.8}) * SE(mean diff) with
-    the clustered SE otherwise. It is None when no pair disagrees.
+    Without clusters the CI is a bootstrap over items, and a pass/fail metric
+    gets the exact McNemar test. With clusters the CI and p-value come from
+    the clustered t-test (`stats.paired_clustered`).
+
+    The MDE matches the test: for an unclustered pass rate it is the exact
+    McNemar MDE at the observed discordant rate (`mde_paired_binary`, None
+    when no effect up to that rate reaches 80% power). With clusters it is
+    (t_{G-1, 0.975} + t_{G-1, 0.8}) * SE, and without clusters for a numeric
+    metric (z_{0.975} + z_{0.8}) * SE. It is None when no pair disagrees.
     """
     a = metric_column(baseline, metric, on_error=on_error)
     b = metric_column(candidate, metric, on_error=on_error)
@@ -142,7 +152,7 @@ def compare_runs(
             raise RecordError("baseline and candidate disagree on item clusters")
     x = np.array([a.values[i] for i in ids])
     y = np.array([b.values[i] for i in ids])
-    comparison = paired_bootstrap(x, y, clusters, n_boot=n_boot, confidence=confidence, seed=seed)
+    comparison = paired_comparison(x, y, clusters, n_boot=n_boot, confidence=confidence, seed=seed)
     return RunComparison(
         metric=metric,
         baseline_run=a.run_id,
@@ -182,12 +192,15 @@ def pass_k_from_records(
 def _paired_mde(
     diffs: np.ndarray, clusters: list[str | None] | None, comparison: PairedComparison
 ) -> float | None:
-    if comparison.mcnemar is not None and clusters is None:
+    if clusters is not None:
+        se = clustered_se_floored(diffs, clusters)
+        return None if se == 0 else mde_from_se(se, df=n_clusters(clusters) - 1)
+    if comparison.mcnemar is not None:
         discordant_rate = comparison.mcnemar.discordant / comparison.n
         if discordant_rate == 0:
             return None
         return mde_paired_binary(comparison.n, discordant_rate)
-    se = clustered_se(diffs, clusters)
+    se = clustered_se(diffs)
     return None if se == 0 else mde_from_se(se)
 
 

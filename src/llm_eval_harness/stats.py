@@ -53,7 +53,15 @@ class McNemarResult:
 
 @dataclass(frozen=True)
 class PairedComparison:
-    """Candidate minus baseline on the same items."""
+    """Candidate minus baseline on the same items.
+
+    `low` and `high` are the CI from `method`. `pvalue` is the two-sided
+    p-value of `test` for "no difference", or None when only a bootstrap CI
+    was computed. For the clustered t-test the CI and the p-value are duals:
+    the CI excludes 0 exactly when p < 1 - confidence. Without clusters, a
+    pass/fail metric gets the exact McNemar p-value next to a bootstrap CI, and
+    the two can disagree when only a few pairs are discordant.
+    """
 
     n: int
     baseline_mean: float
@@ -62,10 +70,14 @@ class PairedComparison:
     low: float
     high: float
     confidence: float
-    n_boot: int
-    seed: int
+    method: str
     n_clusters: int
+    test: str | None = None
+    pvalue: float | None = None
+    df: int | None = None
     mcnemar: McNemarResult | None = None
+    n_boot: int | None = None
+    seed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +95,15 @@ def z_value(confidence: float) -> float:
     if not 0.0 < confidence < 1.0:
         raise ValueError(f"confidence must be in (0, 1), got {confidence}")
     return float(sps.norm.ppf(1.0 - (1.0 - confidence) / 2.0))
+
+
+def t_value(confidence: float, df: int) -> float:
+    """Two-sided Student t quantile, t_{df, 1 - alpha/2} with alpha = 1 - confidence."""
+    if not 0.0 < confidence < 1.0:
+        raise ValueError(f"confidence must be in (0, 1), got {confidence}")
+    if df < 1:
+        raise ValueError(f"df must be >= 1, got {df}")
+    return float(sps.t.ppf(1.0 - (1.0 - confidence) / 2.0, df))
 
 
 def wilson_interval(successes: int, n: int, confidence: float = 0.95) -> Interval:
@@ -116,7 +137,10 @@ def design_effect(values: ArrayLike, clusters: Sequence[Hashable | None]) -> flo
         deff = max(1, SE_clustered^2 / SE_iid^2)
 
     both from `clustered_se`. Returns 1 when the values have no variance (for
-    example no failures at all), since the data then says nothing about clustering.
+    example no failures at all), since the data then says nothing about
+    clustering. The floor means clustering can widen an interval but never
+    narrow it: with 8 clusters a clustered SE below the item-level SE is far
+    more likely to be noise than real negative correlation.
     """
     x = _as_1d(values)
     se_iid = clustered_se(x)
@@ -128,22 +152,31 @@ def design_effect(values: ArrayLike, clusters: Sequence[Hashable | None]) -> flo
 def wilson_interval_clustered(
     values: ArrayLike, clusters: Sequence[Hashable | None], confidence: float = 0.95
 ) -> Interval:
-    """Wilson interval for a pass rate whose items come in clusters.
+    """Wilson interval for a pass rate whose items come in G clusters.
 
-    Plugs the effective sample size n_eff = n / deff (`design_effect`) into the
-    Wilson formula. The effective-sample-size idea is from Korn and Graubard
-    (1998), Survey Methodology 24(2), who pair it with a Clopper-Pearson
-    interval. Unlike a clustered normal interval this stays sensible at p = 0
-    or 1, where the normal interval collapses to a single point.
+    Plugs the Korn-Graubard effective sample size into the Wilson formula:
+
+        n_eff = n / deff * (z_{1 - alpha/2} / t_{G - 1, 1 - alpha/2})^2
+
+    with deff from `design_effect` (CR1 clustered SE, floored at 1). The second
+    factor is Korn and Graubard's degrees-of-freedom adjustment (Korn and
+    Graubard 1998, Survey Methodology 24(2), who pair n_eff with a
+    Clopper-Pearson interval). In simulation at 8 clusters of 5 items, n / deff
+    alone covered 90 to 92%, and this version 95 to 97% (`tests/test_stats.py`
+    checks at least 93%). Unlike a clustered normal interval this stays
+    sensible at p = 0 or 1.
     """
     x = _as_1d(values)
     if not _is_binary(x):
         raise ValueError("wilson_interval_clustered needs binary values")
-    n_clusters = int(_checked_codes(clusters, x.size).max()) + 1
-    n_eff = x.size / design_effect(x, clusters)
+    g = n_clusters(clusters, x.size)
+    if g < 2:
+        raise ValueError("a clustered interval needs at least 2 clusters")
+    z = z_value(confidence)
+    n_eff = x.size / design_effect(x, clusters) * (z / t_value(confidence, g - 1)) ** 2
     p = float(x.mean())
-    low, high = _wilson_bounds(p, n_eff, z_value(confidence))
-    method = f"Wilson with design-effect n ({n_clusters} clusters)"
+    low, high = _wilson_bounds(p, n_eff, z)
+    method = f"Wilson with Korn-Graubard effective n ({g} clusters)"
     return Interval(p, low, high, x.size, confidence, method)
 
 
@@ -157,40 +190,48 @@ def cluster_codes(clusters: Sequence[Hashable | None]) -> NDArray[np.intp]:
     return out
 
 
+def n_clusters(clusters: Sequence[Hashable | None], n: int | None = None) -> int:
+    """Number of distinct clusters G. Pass `n` to check there is one label per value."""
+    codes = cluster_codes(clusters) if n is None else _checked_codes(clusters, n)
+    return int(codes.max()) + 1 if codes.size else 0
+
+
 def clustered_se(values: ArrayLike, clusters: Sequence[Hashable | None] | None = None) -> float:
-    """Standard error of the mean, optionally clustered.
+    """Standard error of the mean, optionally cluster-robust.
 
-    Miller (2024), "Adding Error Bars to Evals", arXiv 2411.00640, writes the
-    clustered SE as the ordinary (CLT) standard error plus the covariance of
-    items that share a cluster. With d_i = x_i - xbar, n items and s^2 the
-    sample variance (ddof = 1):
+    Without clusters this is s / sqrt(n) with the sample variance s^2 (ddof = 1).
+    With G clusters it is the CR1 cluster-robust SE of a mean. With
+    d_i = x_i - xbar:
 
-        SE^2 = s^2 / n + (1 / n^2) * sum_c sum_{i != j in c} d_i d_j
-             = s^2 / n + (sum_c (sum_{i in c} d_i)^2 - sum_i d_i^2) / n^2
+        SE^2 = G / (G - 1) * sum_c (sum_{i in c} d_i)^2 / n^2
 
-    Compared with the textbook cluster-robust form, sqrt(sum_c (sum_{i in c}
-    d_i)^2) / n, the only change is the unbiased s^2 in the first term, which
-    is n / (n - 1) times larger than sum_i d_i^2 / n^2. That is what makes the
-    fallback exact: when every item is its own cluster the cross terms vanish
-    and this returns the ordinary SE, s / sqrt(n). With `clusters=None` that is
-    what you get directly.
+    This is the Liang-Zeger sandwich with the usual G / (G - 1) small-sample
+    factor, which is what Stata and statsmodels report as CR1. Miller (2024),
+    "Adding Error Bars to Evals", arXiv 2411.00640, writes the same quantity as
+    the ordinary SE plus the covariance of items that share a cluster. The two
+    forms differ only in small-sample factors, and the G / (G - 1) one matters
+    with the handful of clusters typical of evals. When every item is its own
+    cluster (G = n) the formula reduces exactly to s / sqrt(n).
     """
     x = _as_1d(values)
     n = x.size
     if n < 2:
         raise ValueError("need at least 2 values for a standard error")
     d = x - x.mean()
-    sum_sq = float(np.dot(d, d))
-    s2 = sum_sq / (n - 1)
     if clusters is None:
-        return math.sqrt(s2 / n)
+        return math.sqrt(float(np.dot(d, d)) / (n - 1) / n)
     codes = _checked_codes(clusters, n)
-    if codes.max() + 1 < 2:
+    g = int(codes.max()) + 1
+    if g < 2:
         raise ValueError("clustered SE needs at least 2 clusters")
     cluster_sums = np.bincount(codes, weights=d)
-    cross = float(np.dot(cluster_sums, cluster_sums)) - sum_sq
-    # SE^2 >= sum_c(...)^2 / n^2 >= 0 algebraically. max() only absorbs rounding.
-    return math.sqrt(max(s2 / n + cross / (n * n), 0.0))
+    return math.sqrt(g / (g - 1) * float(np.dot(cluster_sums, cluster_sums))) / n
+
+
+def clustered_se_floored(values: ArrayLike, clusters: Sequence[Hashable | None]) -> float:
+    """max(item-level SE, CR1 clustered SE): the SE after flooring the design effect at 1."""
+    x = _as_1d(values)
+    return max(clustered_se(x), clustered_se(x, clusters))
 
 
 def mean_ci(
@@ -199,23 +240,31 @@ def mean_ci(
     confidence: float = 0.95,
     bounds: tuple[float, float] | None = None,
 ) -> Interval:
-    """Mean with a normal-approximation CI, xbar +/- z * SE, using `clustered_se`.
+    """Mean with a Student t interval, xbar +/- t * SE.
+
+    Without clusters: SE = s / sqrt(n) and n - 1 degrees of freedom. With G
+    clusters: SE = `clustered_se_floored` and G - 1 degrees of freedom. Both
+    corrections matter with few clusters. In simulation at 8 clusters, a z
+    quantile without the G / (G - 1) factor covered about 88%, and this version
+    about 96% (`tests/test_stats.py` checks at least 93%).
 
     Pass `bounds` to clip the interval to a valid range. For pass rates use
     `wilson_interval` or `wilson_interval_clustered`, which behave much better
     at small n and near 0 or 1.
     """
     x = _as_1d(values)
-    se = clustered_se(x, clusters)
-    z = z_value(confidence)
     mean = float(x.mean())
-    low, high = mean - z * se, mean + z * se
+    if clusters is None:
+        se, df = clustered_se(x), x.size - 1
+        method = "t, SE = s/sqrt(n)"
+    else:
+        g = n_clusters(clusters, x.size)
+        se, df = clustered_se_floored(x, clusters), g - 1
+        method = f"t with CR1 clustered SE ({g} clusters, {df} df)"
+    half = t_value(confidence, df) * se
+    low, high = mean - half, mean + half
     if bounds is not None:
         low, high = max(bounds[0], low), min(bounds[1], high)
-    if clusters is None:
-        method = "Normal, SE = s/sqrt(n)"
-    else:
-        method = f"Normal, clustered SE ({int(cluster_codes(clusters).max()) + 1} clusters)"
     return Interval(mean, low, high, x.size, confidence, method)
 
 
@@ -289,29 +338,25 @@ def mcnemar_exact(baseline: ArrayLike, candidate: ArrayLike) -> McNemarResult:
 def paired_bootstrap(
     baseline: ArrayLike,
     candidate: ArrayLike,
-    clusters: Sequence[Hashable | None] | None = None,
+    *,
     n_boot: int = 10_000,
     confidence: float = 0.95,
     seed: int = 0,
 ) -> PairedComparison:
-    """Mean difference (candidate - baseline) on paired items with a bootstrap CI.
+    """Mean difference (candidate - baseline) on paired, independent items with a bootstrap CI.
 
     d_i = candidate_i - baseline_i, diff = mean(d). The CI is the percentile
-    interval of `bootstrap_means(d)`, resampling clusters when given so that
-    correlated items (for example questions about the same source article) move
-    together. Pairing removes the between-item variance that an unpaired
-    comparison would carry (Miller 2024, arXiv 2411.00640). When both
-    inputs are binary the exact McNemar test is attached as well.
+    interval of `bootstrap_means(d)`. Pairing removes the between-item
+    variance that an unpaired comparison would carry (Miller 2024, arXiv
+    2411.00640). When both inputs are binary the exact McNemar test supplies
+    the p-value. For clustered items use `paired_clustered`: a percentile
+    cluster bootstrap covered only about 88% at 8 clusters.
     """
-    a = _as_1d(baseline)
-    b = _as_1d(candidate)
-    if a.size != b.size:
-        raise ValueError(f"length mismatch: {a.size} vs {b.size}")
+    a, b = _paired_arrays(baseline, candidate)
     d = b - a
-    reps = bootstrap_means(d, clusters, n_boot=n_boot, seed=seed)
+    reps = bootstrap_means(d, n_boot=n_boot, seed=seed)
     ci = percentile_interval(reps, float(d.mean()), d.size, confidence)
-    binary = _is_binary(a) and _is_binary(b)
-    n_clusters = d.size if clusters is None else int(cluster_codes(clusters).max()) + 1
+    mcnemar = mcnemar_exact(a, b) if _is_binary(a) and _is_binary(b) else None
     return PairedComparison(
         n=d.size,
         baseline_mean=float(a.mean()),
@@ -320,45 +365,150 @@ def paired_bootstrap(
         low=ci.low,
         high=ci.high,
         confidence=confidence,
+        method="percentile bootstrap over items",
+        n_clusters=d.size,
+        test=None if mcnemar is None else "exact McNemar test",
+        pvalue=None if mcnemar is None else mcnemar.pvalue,
+        mcnemar=mcnemar,
         n_boot=n_boot,
         seed=seed,
-        n_clusters=n_clusters,
-        mcnemar=mcnemar_exact(a, b) if binary else None,
     )
 
 
-def mde_from_se(se: float, alpha: float = 0.05, power: float = 0.8) -> float:
-    """Minimum detectable effect for a two-sided z-test with standard error `se`.
+def paired_clustered(
+    baseline: ArrayLike,
+    candidate: ArrayLike,
+    clusters: Sequence[Hashable | None],
+    *,
+    confidence: float = 0.95,
+) -> PairedComparison:
+    """Mean difference on paired items that come in G clusters, with a clustered t-test.
+
+    With d_i = candidate_i - baseline_i and SE = `clustered_se_floored(d)`:
+
+        CI = mean(d) +/- t_{G - 1, 1 - alpha/2} * SE
+        p  = 2 * P(T_{G - 1} > |mean(d)| / SE)
+
+    so the CI excludes 0 exactly when p < alpha. Flooring the design effect at
+    1 means clustering never makes the interval narrower than the item-level
+    SE would. This is the same interval `mean_ci` gives for the differences.
+    For binary metrics it replaces McNemar, which assumes independent pairs.
+    Durkalski et al. (2003), Statistics in Medicine 22(15), use the same
+    cluster-sum idea for clustered matched pairs, with a chi-square reference.
+    """
+    a, b = _paired_arrays(baseline, candidate)
+    d = b - a
+    g = n_clusters(clusters, d.size)
+    if g < 2:
+        raise ValueError("a clustered comparison needs at least 2 clusters")
+    df = g - 1
+    diff = float(d.mean())
+    se = clustered_se_floored(d, clusters)
+    half = t_value(confidence, df) * se
+    # With SE = 0 every difference is identical: p is 1 if they are all 0, else 0.
+    pvalue = float(2.0 * sps.t.sf(abs(diff) / se, df)) if se > 0 else float(diff == 0)
+    low, high = diff - half, diff + half
+    if _is_binary(a) and _is_binary(b):
+        low, high = max(-1.0, low), min(1.0, high)
+    return PairedComparison(
+        n=d.size,
+        baseline_mean=float(a.mean()),
+        candidate_mean=float(b.mean()),
+        diff=diff,
+        low=low,
+        high=high,
+        confidence=confidence,
+        method=f"t with CR1 clustered SE ({g} clusters, {df} df)",
+        n_clusters=g,
+        test="clustered t-test",
+        pvalue=pvalue,
+        df=df,
+    )
+
+
+def paired_comparison(
+    baseline: ArrayLike,
+    candidate: ArrayLike,
+    clusters: Sequence[Hashable | None] | None = None,
+    *,
+    n_boot: int = 10_000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> PairedComparison:
+    """`paired_bootstrap` without clusters, `paired_clustered` with them."""
+    if clusters is None:
+        return paired_bootstrap(
+            baseline, candidate, n_boot=n_boot, confidence=confidence, seed=seed
+        )
+    return paired_clustered(baseline, candidate, clusters, confidence=confidence)
+
+
+def mde_from_se(se: float, alpha: float = 0.05, power: float = 0.8, df: int | None = None) -> float:
+    """Minimum detectable effect of a two-sided z-test (or t-test with `df`) with standard error se.
 
     MDE = (z_{1 - alpha/2} + z_{power}) * se. At alpha 0.05 and 80% power the
-    multiplier is 1.960 + 0.842 = 2.802.
+    multiplier is 1.960 + 0.842 = 2.802. With `df`, t quantiles replace the z
+    quantiles, the usual approximation for a t-test (at 7 df: 2.365 + 0.896).
     """
     if se < 0:
         raise ValueError(f"se must be >= 0, got {se}")
     if not 0.0 < power < 1.0:
         raise ValueError(f"power must be in (0, 1), got {power}")
-    return (z_value(1.0 - alpha) + float(sps.norm.ppf(power))) * se
+    if df is None:
+        return (z_value(1.0 - alpha) + float(sps.norm.ppf(power))) * se
+    return (t_value(1.0 - alpha, df) + float(sps.t.ppf(power, df))) * se
+
+
+def mcnemar_exact_power(n: int, discordant_rate: float, diff: float, alpha: float = 0.05) -> float:
+    """Power of the two-sided exact McNemar test (`mcnemar_exact`, reject when p < alpha).
+
+    Pairs are independent. Each is discordant with probability p_d, and a
+    discordant pair favors the candidate with probability
+    q = (p_d + diff) / (2 p_d), where diff is the difference in pass rates. So
+    the number of discordant pairs is D ~ Binomial(n, p_d) and, given D = d,
+    the candidate-only count is Binomial(d, q). The test rejects when the
+    smaller of the two discordant counts is at most k_d, the largest k with
+    2 * P(Binomial(d, 1/2) <= k) < alpha. Therefore
+
+        power = sum_d P(D = d) * P(reject | d, q)
+
+    computed exactly, with no normal approximation.
+    """
+    _check_paired_power_args(n, discordant_rate, alpha)
+    if abs(diff) > discordant_rate + 1e-12:
+        raise ValueError(
+            f"|diff| = {abs(diff)} cannot exceed the discordant rate {discordant_rate}"
+        )
+    return _mcnemar_power(n, discordant_rate, diff, _mcnemar_critical(n, alpha))
 
 
 def mde_paired_binary(
     n: int, discordant_rate: float, alpha: float = 0.05, power: float = 0.8
-) -> float:
-    """MDE (difference in pass rates) for a paired binary comparison of n items.
+) -> float | None:
+    """Smallest difference in pass rates the exact McNemar test detects with `power`.
 
-    Each pair contributes d_i in {-1, 0, 1}. With discordant rate p_d and true
-    difference delta, Var(d_i) = p_d - delta^2. We use the variance under H0,
-    p_d, for both terms:
-
-        MDE = (z_{1 - alpha/2} + z_{power}) * sqrt(p_d / n)
-
-    Dropping delta^2 makes this slightly larger than the exact solution of
-    Connor (1987), Biometrics 43(1), so it errs on the conservative side.
+    Holds the discordant rate p_d at its observed value and searches (by
+    bisection, since power grows with |diff|) for the smallest diff in
+    (0, p_d] with `mcnemar_exact_power` >= power. The pass rates of two runs
+    can differ by at most p_d, so the MDE never exceeds it. Returns None when
+    even diff = p_d (every discordant pair going one way) has less power than
+    asked, which happens when n * p_d is small: the test needs at least 6
+    discordant pairs to reach p < 0.05 at all.
     """
-    if n <= 0:
-        raise ValueError(f"n must be positive, got {n}")
-    if not 0.0 < discordant_rate <= 1.0:
-        raise ValueError(f"discordant_rate must be in (0, 1], got {discordant_rate}")
-    return mde_from_se(math.sqrt(discordant_rate / n), alpha, power)
+    _check_paired_power_args(n, discordant_rate, alpha)
+    if not 0.0 < power < 1.0:
+        raise ValueError(f"power must be in (0, 1), got {power}")
+    critical = _mcnemar_critical(n, alpha)
+    if _mcnemar_power(n, discordant_rate, discordant_rate, critical) < power:
+        return None
+    low, high = 0.0, discordant_rate
+    while high - low > 1e-7:
+        mid = (low + high) / 2.0
+        if _mcnemar_power(n, discordant_rate, mid, critical) >= power:
+            high = mid
+        else:
+            low = mid
+    return high
 
 
 def mde_two_proportions(
@@ -439,6 +589,53 @@ def _wilson_bounds(p: float, n: float, z: float) -> tuple[float, float]:
     center = (p + z * z / (2 * n)) / denom
     half = z / denom * math.sqrt(p * (1.0 - p) / n + z * z / (4 * n * n))
     return max(0.0, center - half), min(1.0, center + half)
+
+
+def _check_paired_power_args(n: int, discordant_rate: float, alpha: float) -> None:
+    if operator.index(n) <= 0:
+        raise ValueError(f"n must be positive, got {n}")
+    if not 0.0 < discordant_rate <= 1.0:
+        raise ValueError(f"discordant_rate must be in (0, 1], got {discordant_rate}")
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be in (0, 1), got {alpha}")
+
+
+def _mcnemar_critical(n: int, alpha: float) -> NDArray[np.int64]:
+    """For d = 0..n discordant pairs, the largest k with 2 * P(Bin(d, 1/2) <= k) < alpha.
+
+    -1 where no count is significant. For p = 1/2 the two-sided binomial
+    p-value of `scipy.stats.binomtest` is min(1, 2 * P(X <= min(b, c))), so
+    `mcnemar_exact` gives p < alpha exactly when min(b, c) <= k_d.
+    """
+    d = np.arange(n + 1)
+    half = alpha / 2.0
+    k = sps.binom.ppf(half, d, 0.5).astype(np.int64) - 1
+    # ppf is the smallest k with cdf >= half. Step once either way to absorb rounding.
+    k = np.where(sps.binom.cdf(k, d, 0.5) >= half, k - 1, k)
+    k = np.where(sps.binom.cdf(k + 1, d, 0.5) < half, k + 1, k)
+    return np.maximum(k, -1)
+
+
+def _mcnemar_power(
+    n: int, discordant_rate: float, diff: float, critical: NDArray[np.int64]
+) -> float:
+    d = np.arange(n + 1)
+    weights = sps.binom.pmf(d, n, discordant_rate)
+    q = min(1.0, max(0.0, (discordant_rate + diff) / (2.0 * discordant_rate)))
+    some = critical >= 0
+    k = np.where(some, critical, 0)
+    reject = sps.binom.cdf(k, d, q) + sps.binom.sf(d - k - 1, d, q)
+    return float(np.dot(weights, np.where(some, reject, 0.0)))
+
+
+def _paired_arrays(
+    baseline: ArrayLike, candidate: ArrayLike
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    a = _as_1d(baseline)
+    b = _as_1d(candidate)
+    if a.size != b.size:
+        raise ValueError(f"length mismatch: {a.size} vs {b.size}")
+    return a, b
 
 
 def _check_nck(n: int, c: int, k: int) -> None:

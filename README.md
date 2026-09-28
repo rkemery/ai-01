@@ -25,23 +25,25 @@ Items dropped because the judge reply did not parse: 1 (q-disputes-3).
 
 | Metric | Value | 95% CI | n |
 |---|---|---|---|
-| correct | 82.1% | 66.2% to 91.4% | 39 |
-| grounded | 59.0% | 43.4% to 72.9% | 39 |
-| pii_leak | 0.0% | 0.0% to 8.8% | 40 |
-| latency_ms | 1065 | 935.3 to 1195 | 40 |
+| correct | 82.1% | 61.2% to 93.0% | 39 |
+| grounded | 59.0% | 40.4% to 75.3% | 39 |
+| pii_leak | 0.0% | 0.0% to 12.3% | 40 |
+| latency_ms | 1065 | 899.3 to 1231 | 40 |
 
-MDE against another run of the same size (unpaired, 80% power, alpha 0.05): correct 26.4 pts, grounded 30.1 pts, pii_leak n/a, latency_ms 262.2. A paired comparison on the same items usually detects less.
+MDE against another run of the same size (unpaired, 80% power, alpha 0.05): correct 27.9 pts, grounded 31.7 pts, pii_leak n/a, latency_ms 277.7. A paired comparison on the same items usually detects less.
 
-CI method: Wilson with design-effect n (8 clusters) for correct, grounded, pii_leak. Normal, clustered SE (8 clusters) for latency_ms. Excluded errored items: 1 from correct, 1 from grounded.
+CI method: Wilson with Korn-Graubard effective n (8 clusters) for correct, grounded, pii_leak. t with CR1 clustered SE (8 clusters, 7 df) for latency_ms. Excluded errored items: 1 from correct, 1 from grounded.
 
 Simulated cost of the candidate run at gpt-6-luna list prices: $0.0087 for 40 answers.
 
-**Candidate vs baseline**, paired by item, bootstrap resampling articles.
+**Candidate vs baseline**, paired by item, clustered by article.
 
-| Metric | Baseline | Candidate | Diff | 95% CI | McNemar p | MDE | n |
+| Metric | Baseline | Candidate | Diff | 95% CI | p | MDE | n |
 |---|---|---|---|---|---|---|---|
-| correct | 64.1% | 82.1% | +17.9 pts | +10.0 pts to +26.3 pts | 0.039 | 12.8 pts | 39 |
-| grounded | 74.4% | 59.0% | -15.4 pts | -37.5 pts to +10.5 pts | 0.180 | 34.5 pts | 39 |
+| correct | 64.1% | 82.1% | +17.9 pts | +0.9 pts to +35.0 pts | 0.042 | 23.6 pts | 39 |
+| grounded | 74.4% | 59.0% | -15.4 pts | -46.2 pts to +15.5 pts | 0.277 | 42.6 pts | 39 |
+
+Method: CI from t with CR1 clustered SE (8 clusters, 7 df), p from the clustered t-test, for correct, grounded.
 
 **Baseline pass rate corrected for judge error** (Rogan-Gladen, CI includes calibration uncertainty).
 
@@ -59,8 +61,8 @@ Hard floors (any single violation blocks)
   [PASS] pii_leak max=0: 0 violations in 40 records
 
 Regressions (candidate - baseline, paired by item_id, 95% bootstrap CI)
-  [PASS] correct (higher is better): +0.179 [+0.100, +0.263] n=39 McNemar p=0.039. Errored items excluded: 1
-  [WARN] grounded (higher is better): -0.154 [-0.375, +0.105] n=39 McNemar p=0.180. Inconclusive, the MDE at this n is about 0.345. Errored items excluded: 1
+  [PASS] correct (higher is better): +0.179 [+0.009, +0.350] n=39. Errored items excluded: 1
+  [WARN] grounded (higher is better): -0.154 [-0.462, +0.155] n=39. Inconclusive, the MDE at this n is about 0.426. Errored items excluded: 1
 ```
 <!-- demo:end -->
 
