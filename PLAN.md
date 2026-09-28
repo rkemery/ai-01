@@ -4,6 +4,16 @@ Five public repos built around one fictional neobank's customer support team. Ev
 
 Budget: $0 cash. LLM calls are paid from Visual Studio monthly Azure credits (spending limit left on, no card on file). Hugging Face and Colab are free tiers.
 
+## Setup status (2026-09-28)
+
+| Item | Status |
+|---|---|
+| Azure subscription | Visual Studio Enterprise (`5a9defb5-…`), $150/month credit, spending limit On, offer type MSDN. A second subscription ("Azure subscription 1") exists on the account and is not used. |
+| Resource group | `rg-ai-portfolio`, East US 2, `Microsoft.CognitiveServices` registered |
+| Service principal | `sp-ai-portfolio`, Contributor + Cognitive Services OpenAI User + Cognitive Services User, all scoped to `rg-ai-portfolio` only. Secret valid 1 year. |
+| Session secrets | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `HF_TOKEN` set in the environment settings (picked up by new sessions). The HF token pasted in chat was revoked. |
+| Repos | `ai-01` to be renamed `llm-eval-harness`. `rag-support-assistant`, `banking77-lora-vs-frontier`, `support-triage-agents`, `guarded-llm-gateway` to be created by the owner (the Claude GitHub App can't create repos), then added to the app's installation. |
+
 ## Models
 
 ### Azure (Foundry, sold directly by Azure, Global Standard, paid by credits)
