@@ -1,6 +1,7 @@
 """llm-eval-harness: a small, dependency-light toolkit for honest LLM evals.
 
-The core needs only numpy and scipy. The Azure client and the Inspect AI
+The core (records, stats, analysis, judge, calibration, labeling, gate,
+report) needs only numpy and scipy. The Azure client and the Inspect AI
 adapter are optional extras and are not imported here.
 """
 
@@ -22,18 +23,22 @@ from llm_eval_harness.client import (
     ModelResponse,
     RetryingClient,
 )
+from llm_eval_harness.judge import ChecklistJudge, JudgeParseError, PairwiseJudge
 from llm_eval_harness.records import EvalRecord, RecordError, read_records, write_records
 
 __all__ = [
     "BudgetExceeded",
     "CacheMiss",
     "CachedClient",
+    "ChecklistJudge",
     "DollarCap",
     "EvalRecord",
     "FakeClient",
+    "JudgeParseError",
     "ModelClient",
     "ModelRequest",
     "ModelResponse",
+    "PairwiseJudge",
     "RecordError",
     "RetryingClient",
     "__version__",
