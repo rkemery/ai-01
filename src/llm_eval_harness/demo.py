@@ -122,9 +122,13 @@ def run_demo(data_dir: str | Path = DEFAULT_DATA_DIR) -> str:
         methods_line(summaries),
         "",
         f"Simulated cost of the candidate run at {candidate[0].model} list prices: "
-        f"${sum(r.cost_usd for r in candidate):.4f} for {len(candidate)} answers, including "
-        f"${sum(r.cost_usd for r in errored):.4f} on {len(errored)} errored "
-        f"item{'' if len(errored) == 1 else 's'}, which the latency and cost means leave out.",
+        f"${sum(r.cost_usd for r in candidate):.4f} for {len(candidate)} answers"
+        + (
+            f", including ${sum(r.cost_usd for r in errored):.4f} on {len(errored)} failed "
+            "model calls, which the latency and cost means leave out."
+            if errored
+            else ". The judge error is a scoring error, so that answer's latency and cost count."
+        ),
         "",
         "**Candidate vs baseline**, paired by item, clustered by article.",
         "",

@@ -182,3 +182,11 @@ def test_calibrate_apply_handles_errored_records(capsys: pytest.CaptureFixture[s
     assert "Rerun with --on-error exclude" in err
     assert main([*args, str(DATA / "candidate.jsonl"), "--on-error", "exclude"]) == 0
     assert "1 errored items left out of the corrected pass rate" in capsys.readouterr().out
+
+
+def test_stats_latency_on_demo_data_needs_no_on_error(capsys: pytest.CaptureFixture[str]) -> None:
+    """The demo's one error is a judge parse failure, so the answer's latency still counts."""
+    assert main(["stats", str(DATA / "candidate.jsonl"), "--metric", "latency_ms"]) == 0
+    out = capsys.readouterr().out
+    assert "| latency_ms |" in out
+    assert out.split("| latency_ms |")[1].splitlines()[0].strip().endswith("| 40 |")

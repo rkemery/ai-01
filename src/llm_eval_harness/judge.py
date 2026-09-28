@@ -113,7 +113,11 @@ class ChecklistVerdict:
 
 @dataclass(frozen=True)
 class JudgeOutcome:
-    """Result of `ChecklistJudge.score`: scores on success, an error message otherwise."""
+    """Result of `ChecklistJudge.score`: scores on success, an error message otherwise.
+
+    Store `error` in the record's `score_error`, not its `error`: the answer
+    that was judged exists, only its scoring failed.
+    """
 
     scores: dict[str, bool]
     reasons: dict[str, str]

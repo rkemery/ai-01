@@ -7,6 +7,7 @@ import pytest
 from helpers import record, run
 
 from llm_eval_harness.analysis import summarize_metric
+from llm_eval_harness.gate import Floor, check_floor
 from llm_eval_harness.records import (
     EvalRecord,
     MissingScoreError,
@@ -183,3 +184,33 @@ def test_missing_score_message_names_the_python_option() -> None:
         metric_column([record("q1", scores={}, error="crash")], "correct")
     assert "--on-error" not in str(info.value)
     assert info.value.detail.endswith("because of an error: crash")
+
+
+def test_a_scoring_error_keeps_the_model_call_measurements() -> None:
+    """Re-review finding: a judge that failed to parse voided the answer's latency and cost."""
+    records = [
+        record("q1", scores={"correct": True, "pii_leak": False}, latency_ms=900.0, cost_usd=0.002),
+        record(
+            "q2",
+            scores={"pii_leak": False},
+            score_error="JudgeParseError: reply is not valid JSON",
+            latency_ms=1100.0,
+            cost_usd=0.004,
+        ),
+    ]
+    latency = metric_column(records, "latency_ms")  # no on_error needed
+    assert latency.values == {"q1": 900.0, "q2": 1100.0}
+    assert metric_column(records, "cost_usd").values["q2"] == 0.004
+    with pytest.raises(MissingScoreError, match="JudgeParseError"):
+        metric_column(records, "correct")
+    assert metric_column(records, "correct", on_error="exclude").excluded == ("q2",)
+    check = check_floor(records, Floor.parse("latency_ms:max=5000"))
+    assert (check.n_checked, check.unverified) == (2, ())
+
+
+def test_score_error_validation() -> None:
+    record("q1", scores={}, score_error="JudgeParseError: x")  # allowed without scores
+    with pytest.raises(RecordError, match="score_error"):
+        record("q1", score_error="")
+    with pytest.raises(RecordError, match="must carry an error or a score_error"):
+        record("q1", scores={})

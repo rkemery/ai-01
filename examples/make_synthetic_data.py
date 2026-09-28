@@ -248,7 +248,8 @@ def build_run(
                 tokens_out=usage.output_tokens,
                 cost_usd=round(cost_usd(DEFAULT_PRICES[ANSWER_MODEL], usage), 8),
                 latency_ms=usage.latency_ms,
-                error=outcome.error,
+                # A judge parse failure is a scoring error: the answer and its usage are real.
+                score_error=outcome.error,
                 meta={"synthetic": True, "judge_fingerprint": judge.fingerprint},
             )
         )

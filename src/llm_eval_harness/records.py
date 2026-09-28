@@ -7,6 +7,11 @@ separate runs with their own `run_id`.
 
 Token convention: `tokens_out` is the billed output count and already includes
 `reasoning_tokens`, matching what the OpenAI Responses API reports in `usage`.
+
+Two kinds of failure: `error` means the model call itself failed, so there is
+no answer and its latency, cost and token counts are not measurements.
+`score_error` means the answer exists but a scorer failed (for example the
+judge reply did not parse), so only the missing scores are affected.
 """
 
 from __future__ import annotations
@@ -62,6 +67,7 @@ class EvalRecord:
     cost_usd: float = 0.0
     latency_ms: float = 0.0
     error: str | None = None
+    score_error: str | None = None
     meta: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -102,12 +108,13 @@ def validate_record(record: EvalRecord) -> None:
         value = getattr(record, name)
         if not _is_number(value) or value < 0:
             raise RecordError(f"{name} must be a finite number >= 0, got {value!r}")
-    if record.error is not None:
-        _check_text("error", record.error)
+    for name in ("error", "score_error"):
+        if getattr(record, name) is not None:
+            _check_text(name, getattr(record, name))
     if not isinstance(record.meta, dict) or not all(isinstance(k, str) for k in record.meta):
         raise RecordError("meta must be a dict with string keys")
-    if not record.scores and record.error is None:
-        raise RecordError("a record with no scores must carry an error")
+    if not record.scores and record.error is None and record.score_error is None:
+        raise RecordError("a record with no scores must carry an error or a score_error")
 
 
 def write_records(path: str | Path, records: Iterable[EvalRecord], *, append: bool = False) -> int:
@@ -209,15 +216,17 @@ def metric_column(
     """Extract one metric from a single run.
 
     A metric comes from `scores`, or from a numeric record field such as
-    `latency_ms`. When a record has an `error` and lacks the metric, `on_error`
-    decides: 'raise' (the default) raises `MissingScoreError`, 'exclude' leaves
-    the item out and lists it in `excluded` so callers can report it. A missing
-    metric on a record without an error is always a contract violation.
+    `latency_ms`. When a record has an `error` or a `score_error` and lacks the
+    metric, `on_error` decides: 'raise' (the default) raises
+    `MissingScoreError`, 'exclude' leaves the item out and lists it in
+    `excluded` so callers can report it. A missing metric on a record without
+    either is always a contract violation.
 
-    The record fields (`latency_ms`, `cost_usd`, token counts) of an errored
-    record count as missing too: a crash reports 0 ms and a timeout reports the
-    timeout, so neither belongs in a mean. Sum `cost_usd` over every record for
-    total spend.
+    The record fields (`latency_ms`, `cost_usd`, token counts) of a record
+    whose model call failed (`error`) count as missing too: a crash reports
+    0 ms and a timeout reports the timeout, so neither belongs in a mean. A
+    record with only a `score_error` keeps them, since its model call worked.
+    Sum `cost_usd` over every record for total spend.
     """
     if on_error not in get_args(OnError):
         raise ValueError(f"on_error must be one of {get_args(OnError)}, got {on_error!r}")
@@ -235,7 +244,7 @@ def metric_column(
             if on_error == "raise":
                 raise MissingScoreError(
                     f"item {record.item_id!r} in run {run_id!r} has no {metric!r} "
-                    f"because of an error: {record.error}"
+                    f"because of an error: {record.error or record.score_error}"
                 )
             excluded.append(record.item_id)
             clusters[record.item_id] = record.cluster
@@ -261,15 +270,15 @@ def metric_value(record: EvalRecord, metric: str) -> float | bool | None:
     """The metric's value, or None when it is missing because the record has an error.
 
     A score an errored record still carries (for example a PII check that ran
-    before the judge failed) is returned. Its record fields are not: see
-    `metric_column`.
+    before the judge failed) is returned. Record fields are None when the model
+    call failed (`error`), and returned when only scoring failed (`score_error`).
     """
     if metric in record.scores:
         return record.scores[metric]
-    if record.error is not None:
-        return None
     if metric in NUMERIC_FIELDS:
-        return getattr(record, metric)
+        return None if record.error is not None else getattr(record, metric)
+    if record.error is not None or record.score_error is not None:
+        return None
     raise RecordError(
         f"item {record.item_id!r} in run {record.run_id!r} has no metric {metric!r} "
         f"(scores: {sorted(record.scores)})"

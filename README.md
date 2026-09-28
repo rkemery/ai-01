@@ -28,13 +28,13 @@ Items dropped because the judge reply did not parse: 1 (q-disputes-3).
 | correct | 82.1% | 61.2% to 93.0% | 39 |
 | grounded | 59.0% | 40.4% to 75.3% | 39 |
 | pii_leak | 0.0% | 0.0% to 12.3% | 40 |
-| latency_ms | 1077 | 925.5 to 1229 | 39 |
+| latency_ms | 1065 | 899.3 to 1231 | 40 |
 
-MDE against another run of the same size (unpaired, 80% power, alpha 0.05): correct 27.9 pts, grounded 31.7 pts, pii_leak n/a, latency_ms 254.4. A paired comparison on the same items usually detects less.
+MDE against another run of the same size (unpaired, 80% power, alpha 0.05): correct 27.9 pts, grounded 31.7 pts, pii_leak n/a, latency_ms 277.7. A paired comparison on the same items usually detects less.
 
-CI method: Wilson with Korn-Graubard effective n (8 clusters) for correct, grounded, pii_leak. t with CR1 clustered SE (8 clusters, 7 df) for latency_ms. Excluded errored items: 1 from correct, 1 from grounded, 1 from latency_ms.
+CI method: Wilson with Korn-Graubard effective n (8 clusters) for correct, grounded, pii_leak. t with CR1 clustered SE (8 clusters, 7 df) for latency_ms. Excluded errored items: 1 from correct, 1 from grounded.
 
-Simulated cost of the candidate run at gpt-6-luna list prices: $0.0087 for 40 answers, including $0.0002 on 1 errored item, which the latency and cost means leave out.
+Simulated cost of the candidate run at gpt-6-luna list prices: $0.0087 for 40 answers. The judge error is a scoring error, so that answer's latency and cost count.
 
 **Candidate vs baseline**, paired by item, clustered by article.
 
@@ -200,7 +200,8 @@ One JSON object per line, one line per item per run. Repeated trials of the same
 | `cluster` | str or null | For example the source article, used for clustered CIs. |
 | `tokens_in`, `tokens_out`, `reasoning_tokens` | int | `tokens_out` includes reasoning tokens, as the OpenAI `usage` object reports them. |
 | `cost_usd`, `latency_ms` | float | Per item. |
-| `error` | str or null | Set when something failed. A record with no scores must have one. An errored record's latency, cost and token counts are left out of means, since they hold 0 or a timeout rather than a measurement. |
+| `error` | str or null | Set when the model call failed. The record's latency, cost and token counts are then left out of means, since they hold 0 or a timeout rather than a measurement. |
+| `score_error` | str or null | Set when the answer exists but a scorer failed, for example when the judge reply did not parse. Only the missing scores are affected. A record with no scores must carry `error` or `score_error`. |
 | `meta` | dict | Free-form. The judge stores its fingerprint here. |
 
 ## Design decisions
@@ -226,6 +227,7 @@ One JSON object per line, one line per item per run. Repeated trials of the same
 - A normal-approximation paired MDE. It could exceed the discordant rate, which no real difference can: it printed 17.2 points at n = 40 with 15% of pairs discordant, where even the largest possible difference, 15 points, has only 57% power under the exact McNemar test. Where it was attainable, its exact power ran from 77 to 81% instead of 80%. The MDE now comes from the exact test's power, and that n = 40 case reads n/a.
 - Blocking on the bootstrap CI while printing the McNemar p-value. With 4 of 40 items regressing, the gate printed `[BLOCK]` next to p = 0.125. Each metric now has one test, and the gate prints that test.
 - Resampling the labeled pairs to carry calibration uncertainty. When the judge passed every human pass, TPR* was 1 in every replicate. In a seeded simulation where the true TPR was 0.9 but the judge passed all 10 labeled passes, the interval covered 79%. Beta posterior draws brought it to 97%.
+- One `error` field for every failure. After errored records were left out of latency and cost means, a judge reply that failed to parse also voided the real latency and cost of the answer it judged, and `stats --metric latency_ms` on the demo exited 2. Scoring failures now go in `score_error`, which keeps the model call's measurements.
 - Fail-open corners in the gate. An empty candidate run passed its floors, and with `--on-error exclude` a candidate that errored on half the items passed on the other half. A 5% exclusion allowance alone was not enough either: at n = 40, six regressions block (p = 0.031), but if two of them errored instead, the gate warned (p = 0.125) and exited 0. Candidate-only errors on pass/fail metrics now count as failures.
 
 ## Limitations
