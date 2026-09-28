@@ -49,8 +49,10 @@ Method: CI from t with CR1 clustered SE (8 clusters, 7 df), p from the clustered
 
 | Check | Judge pass rate | Corrected | 95% CI (corrected) | n |
 |---|---|---|---|---|
-| correct | 65.0% | 60.0% | 32.0% to 80.0% | 40 |
-| grounded | 75.0% | 83.9% | 61.0% to 100.0% | 40 |
+| correct | 65.0% | 60.0% | 26.1% to 82.5% | 40 |
+| grounded | 75.0% | 83.9% | 62.1% to 100.0% | 40 |
+
+Bootstrap replicates dropped because TPR* + TNR* <= 1, where the correction is undefined: correct 0 of 10000, grounded 0 of 10000.
 
 **CI gate** (`llm-eval gate`), exit code 0:
 

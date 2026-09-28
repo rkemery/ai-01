@@ -10,6 +10,7 @@ from pathlib import Path
 
 from llm_eval_harness.analysis import compare_runs, summarize_metric
 from llm_eval_harness.calibration import (
+    check_same_judge,
     corrected_pass_rate,
     judge_agreement,
     load_split,
@@ -23,6 +24,7 @@ from llm_eval_harness.report import (
     agreement_table,
     comparison_methods_line,
     comparison_table,
+    corrected_note,
     corrected_table,
     mde_line,
     methods_line,
@@ -48,6 +50,7 @@ def run_demo(data_dir: str | Path = DEFAULT_DATA_DIR) -> str:
     labels = read_labels(data_dir / "human_labels.jsonl")
     split = load_split(data_dir / "split.json")
 
+    check_same_judge(candidate, baseline)  # calibrated on candidate answers, applied to baseline
     agreements = []
     corrected = []
     excluded: set[str] = set()
@@ -133,6 +136,8 @@ def run_demo(data_dir: str | Path = DEFAULT_DATA_DIR) -> str:
         "calibration uncertainty).",
         "",
         corrected_table(corrected),
+        "",
+        corrected_note(corrected),
         "",
         f"**CI gate** (`llm-eval gate`), exit code {gate.exit_code}:",
         "",

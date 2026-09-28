@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import runpy
 import sys
 from pathlib import Path
@@ -135,3 +136,49 @@ def test_stats_k_refuses_options_it_cannot_honor(
     err = capsys.readouterr().err
     assert "pass^k counts every trial" in err
     assert "--on-error" not in err
+
+
+def _calibrate_args(*extra: str) -> list[str]:
+    args = ["calibrate", "--judge", str(DATA / "candidate.jsonl"), "--labels"]
+    return [*args, str(DATA / "human_labels.jsonl"), "--n-boot", "300", *extra]
+
+
+def test_calibrate_works_on_demo_data_without_check(capsys: pytest.CaptureFixture[str]) -> None:
+    split = ["--split", str(DATA / "split.json")]
+    assert main(_calibrate_args(*split, "--apply", str(DATA / "baseline.jsonl"))) == 0
+    out = capsys.readouterr().out
+    assert "| correct |" in out
+    assert "| grounded |" in out
+    assert "pii_leak" not in out  # not a labeled check
+    assert "Bootstrap replicates dropped" in out
+
+
+def test_calibrate_requires_an_explicit_split(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as info:
+        main(_calibrate_args())
+    assert info.value.code == 2
+    assert "--split" in capsys.readouterr().err
+
+
+def test_calibrate_apply_refuses_another_judges_results(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rows = [json.loads(line) for line in (DATA / "baseline.jsonl").read_text().splitlines()]
+    for row in rows:
+        row["meta"]["judge_fingerprint"] = "some-other-judge"
+    other = tmp_path / "other.jsonl"
+    other.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    split = ["--split", str(DATA / "split.json")]
+    assert main(_calibrate_args(*split, "--apply", str(other))) == 2
+    assert "judged by ['some-other-judge']" in capsys.readouterr().err
+
+
+def test_calibrate_apply_handles_errored_records(capsys: pytest.CaptureFixture[str]) -> None:
+    # The candidate run has one errored record, q-disputes-3.
+    args = _calibrate_args("--split", str(DATA / "split.json"), "--apply")
+    assert main([*args, str(DATA / "candidate.jsonl")]) == 2
+    err = capsys.readouterr().err
+    assert "q-disputes-3" in err
+    assert "Rerun with --on-error exclude" in err
+    assert main([*args, str(DATA / "candidate.jsonl"), "--on-error", "exclude"]) == 0
+    assert "1 errored items left out of the corrected pass rate" in capsys.readouterr().out

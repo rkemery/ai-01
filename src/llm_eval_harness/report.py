@@ -129,6 +129,15 @@ def corrected_table(results: Sequence[tuple[str, CorrectedPassRate]]) -> str:
     return "\n".join(rows)
 
 
+def corrected_note(results: Sequence[tuple[str, CorrectedPassRate]]) -> str:
+    """How many bootstrap replicates each corrected interval dropped."""
+    parts = [f"{check} {r.invalid_replicates} of {r.n_boot}" for check, r in results]
+    return (
+        "Bootstrap replicates dropped because TPR* + TNR* <= 1, where the correction is "
+        f"undefined: {', '.join(parts)}."
+    )
+
+
 def pass_k_table(result: PassKResult, metric: str) -> str:
     rows = ["| Metric | k | Value | 95% CI | tasks |", "|---|---|---|---|---|"]
     for name, interval in (

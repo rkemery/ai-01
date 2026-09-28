@@ -10,6 +10,7 @@ from helpers import record
 from llm_eval_harness import calibration as cal
 from llm_eval_harness.labeling import LabelRecord
 from llm_eval_harness.records import EvalRecord, RecordError
+from llm_eval_harness.report import corrected_note
 from llm_eval_harness.stats import wilson_interval
 
 
@@ -187,3 +188,47 @@ def test_corrected_pass_rate_coverage_is_reasonable() -> None:
         result = cal.corrected_pass_rate(test, cal_truth ^ cal_flip, cal_truth, n_boot=1000, seed=t)
         covered += result.corrected.low <= true_rate <= result.corrected.high
     assert covered / trials > 0.88
+
+
+# Review findings: calibration uncertainty at TPR = 1, dropped replicates, applying the
+# right judge's calibration.
+
+
+def test_corrected_ci_keeps_calibration_uncertainty_when_observed_tpr_is_1() -> None:
+    """True TPR 0.9, but the judge passed all 10 human passes in the labeled set.
+
+    Resampling within the labeled set gives TPR* = 1 in every replicate, which
+    covered about 74% here. Drawing TPR* and TNR* from Beta posteriors keeps the
+    uncertainty in the interval.
+    """
+    rng = np.random.default_rng(3)
+    true_rate, tpr, tnr, n_test, reps = 0.6, 0.9, 0.85, 200, 300
+    human = np.array([True] * 10 + [False] * 20)
+    covered = 0
+    for t in range(reps):
+        truth = rng.uniform(size=n_test) < true_rate
+        test = np.where(truth, rng.uniform(size=n_test) < tpr, rng.uniform(size=n_test) >= tnr)
+        judge = np.where(human, True, rng.uniform(size=human.size) >= tnr)
+        result = cal.corrected_pass_rate(test, judge, human, n_boot=1000, seed=t)
+        assert result.tpr == 1.0
+        covered += result.corrected.low <= true_rate <= result.corrected.high
+    assert covered / reps >= 0.93
+
+
+def test_corrected_reports_how_many_replicates_were_dropped() -> None:
+    test = [True] * 10 + [False] * 10
+    judge, human = table(tp=4, fp=2, fn=2, tn=3)  # TPR 0.67, TNR 0.6, barely informative
+    result = cal.corrected_pass_rate(test, judge, human, n_boot=2000)
+    assert result.n_boot == 2000
+    assert 0 < result.invalid_replicates < 2000
+    line = corrected_note([("correct", result)])
+    assert f"correct {result.invalid_replicates} of 2000" in line
+
+
+def test_check_same_judge() -> None:
+    same = [judged("q1", True, "fp1"), judged("q2", False, "fp1")]
+    assert cal.check_same_judge(same, [judged("q3", True, "fp1")]) == "fp1"
+    with pytest.raises(cal.CalibrationError, match="judged by \\['fp2'\\]"):
+        cal.check_same_judge(same, [judged("q3", True, "fp2")])
+    with pytest.raises(cal.CalibrationError, match="no judge_fingerprint"):
+        cal.check_same_judge(same, [record("q3", scores={"correct": True})])

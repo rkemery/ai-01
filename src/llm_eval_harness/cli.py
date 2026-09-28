@@ -11,8 +11,10 @@ from pathlib import Path
 from llm_eval_harness import __version__
 from llm_eval_harness.analysis import compare_runs, pass_k_from_records, summarize_metric
 from llm_eval_harness.calibration import (
+    check_same_judge,
     corrected_pass_rate,
     judge_agreement,
+    labeled_checks,
     load_split,
     pair_labels,
     save_split,
@@ -28,6 +30,7 @@ from llm_eval_harness.gate import (
 )
 from llm_eval_harness.judge import load_checklist
 from llm_eval_harness.labeling import (
+    LabelRecord,
     disagreeing_items,
     labeling_order,
     read_items,
@@ -45,6 +48,7 @@ from llm_eval_harness.report import (
     agreement_table,
     comparison_methods_line,
     comparison_table,
+    corrected_note,
     corrected_table,
     mde_line,
     methods_line,
@@ -120,11 +124,32 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("calibrate", help="judge vs human agreement and corrected pass rates")
     p.add_argument("--judge", type=Path, required=True, help="judge results on the labeled items")
     p.add_argument("--labels", type=Path, required=True)
-    p.add_argument("--check", action="append", help="check to calibrate (repeatable)")
-    p.add_argument("--split", type=Path, help="split JSON, to calibrate on one part only")
+    p.add_argument(
+        "--check",
+        action="append",
+        help="check to calibrate (repeatable, default: every labeled one)",
+    )
+    p.add_argument(
+        "--split",
+        type=Path,
+        required=True,
+        help="split JSON from `llm-eval split`. Only --split-part labels are used, so labels "
+        "used to tune the judge never count",
+    )
     p.add_argument("--split-part", choices=["dev", "test"], default="test")
-    p.add_argument("--apply", type=Path, metavar="RESULTS", help="judge results to correct")
+    p.add_argument(
+        "--apply",
+        type=Path,
+        metavar="RESULTS",
+        help="results to correct, judged by the same judge (fingerprint is checked)",
+    )
     p.add_argument("--cluster", action="store_true", help="cluster the --apply bootstrap")
+    p.add_argument(
+        "--on-error",
+        choices=["raise", "exclude"],
+        default="raise",
+        help="errored records in the --apply results",
+    )
     _boot_args(p)
     p.set_defaults(func=cmd_calibrate)
 
@@ -255,10 +280,8 @@ def cmd_split(args: argparse.Namespace) -> int:
 def cmd_calibrate(args: argparse.Namespace) -> int:
     judge_records = read_records(args.judge)
     labels = read_labels(args.labels)
-    checks = args.check or _score_names(judge_records)
-    only = None
-    if args.split is not None:
-        only = getattr(load_split(args.split), args.split_part)
+    checks = args.check or _calibration_checks(judge_records, labels)
+    only = getattr(load_split(args.split), args.split_part)
     pairs = {
         c: pair_labels(judge_records, labels, c, only_items=only, on_error="exclude")
         for c in checks
@@ -267,15 +290,21 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         (c, judge_agreement(p.judge, p.human, n_boot=args.n_boot, seed=args.seed))
         for c, p in pairs.items()
     ]
+    print(f"Judge vs human labels on the {args.split_part} split ({len(only)} items)")
+    print()
     print(agreement_table(agreements))
     for c, p in pairs.items():
         if p.excluded:
             print(f"{c}: {len(p.excluded)} labeled items skipped because the judge errored")
     if args.apply is not None:
         applied = read_records(args.apply)
+        fingerprint = check_same_judge(judge_records, applied)
         results = []
+        excluded: dict[str, int] = {}
         for c, p in pairs.items():
-            column = metric_column(applied, c)
+            column = metric_column(applied, c, on_error=args.on_error)
+            if column.excluded:
+                excluded[c] = len(column.excluded)
             ids = sorted(column.values)
             clusters = [column.clusters[i] for i in ids] if args.cluster else None
             results.append(
@@ -292,9 +321,13 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
                 )
             )
         print()
-        print(f"Corrected pass rates for {single_run_id(applied)}")
+        print(f"Corrected pass rates for {single_run_id(applied)} (judge {fingerprint})")
         print()
         print(corrected_table(results))
+        print()
+        print(corrected_note(results))
+        for c, n in excluded.items():
+            print(f"{c}: {n} errored items left out of the corrected pass rate")
     return 0
 
 
@@ -331,6 +364,14 @@ def _summary_markdown(
         for m in metrics
     ]
     return "\n\n".join([results_table(summaries), mde_line(summaries), methods_line(summaries)])
+
+
+def _calibration_checks(judge_records: list[EvalRecord], labels: list[LabelRecord]) -> list[str]:
+    scored = set(_score_names(judge_records))
+    checks = [c for c in labeled_checks(labels) if c in scored]
+    if not checks:
+        raise ValueError("no check is both labeled and in the judge results, pass --check")
+    return checks
 
 
 def _score_names(records: list[EvalRecord]) -> list[str]:

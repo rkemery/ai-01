@@ -61,8 +61,11 @@ class JudgeAgreement:
 class CorrectedPassRate:
     """Judge pass rate on unlabeled data, before and after Rogan-Gladen correction.
 
-    `invalid_replicates` counts bootstrap draws where TPR* + TNR* <= 1, in which
-    the correction is undefined. They are left out of the interval.
+    `invalid_replicates` counts the `n_boot` draws where TPR* + TNR* <= 1, in
+    which the correction is undefined. They are left out of the interval, which
+    is then conditional on the judge being informative. Report the count: if it
+    is more than a few percent of `n_boot`, the judge is too weak for the
+    interval to mean much.
     """
 
     observed: Interval
@@ -71,6 +74,7 @@ class CorrectedPassRate:
     tnr: float
     n_calibration: int
     invalid_replicates: int
+    n_boot: int
 
 
 @dataclass(frozen=True)
@@ -201,16 +205,21 @@ def corrected_pass_rate(
 
     Lee et al. (2025, arXiv 2511.21140) point out that the error in the judge's
     TPR and TNR, estimated from a finite labeled set, has to show up in the
-    interval next to the sampling error of the test set. Each bootstrap
-    replicate therefore redraws both:
+    interval next to the sampling error of the test set. Each replicate
+    therefore redraws both:
 
     - p*: the judged test set, resampled by item or by cluster
-    - TPR*, TNR*: the calibration pairs, resampled within each human class,
-      which for binary labels is Binomial(n_pos, TPR) / n_pos and
-      Binomial(n_neg, TNR) / n_neg
+    - TPR* ~ Beta(TP + 1/2, FN + 1/2) and TNR* ~ Beta(TN + 1/2, FP + 1/2),
+      the Jeffreys posteriors given the labeled confusion counts
 
     and computes theta* = rogan_gladen(p*, TPR*, TNR*). The CI is the percentile
     interval of theta*. Replicates with TPR* + TNR* <= 1 are counted and dropped.
+
+    Posterior draws instead of resampling the labeled pairs matter when the
+    observed TPR or TNR is 0 or 1. Resampling then gives TPR* = 1 in every
+    replicate, as if the judge were known to be perfect. With 10 human passes
+    all passed by a judge whose true TPR was 0.9, that interval covered about
+    75%, and the Beta version about 97% (`tests/test_calibration.py`).
     """
     test = _as_bools(test_judge, "test_judge")
     agreement = confusion(calibration_judge, calibration_human)
@@ -226,8 +235,8 @@ def corrected_pass_rate(
     test_seed, calib_seed = (int(s) for s in np.random.SeedSequence(seed).generate_state(2))
     p_star = bootstrap_means(test.astype(np.float64), test_clusters, n_boot, test_seed)
     rng = np.random.default_rng(calib_seed)
-    tpr_star = rng.binomial(n_pos, tpr, size=n_boot) / n_pos
-    tnr_star = rng.binomial(n_neg, tnr, size=n_boot) / n_neg
+    tpr_star = rng.beta(agreement.tp + 0.5, agreement.fn + 0.5, size=n_boot)
+    tnr_star = rng.beta(agreement.tn + 0.5, agreement.fp + 0.5, size=n_boot)
     youden = tpr_star + tnr_star - 1.0
     valid = youden > 0
     theta = np.full(n_boot, np.nan)
@@ -243,7 +252,46 @@ def corrected_pass_rate(
         tnr=tnr,
         n_calibration=agreement.n,
         invalid_replicates=int(n_boot - valid.sum()),
+        n_boot=n_boot,
     )
+
+
+def check_same_judge(
+    calibration_records: Sequence[EvalRecord], applied_records: Sequence[EvalRecord]
+) -> str:
+    """Return the judge fingerprint both sets share, or raise `CalibrationError`.
+
+    A judge's TPR and TNR say how to correct that judge's verdicts only. Both
+    sets must carry one and the same `meta["judge_fingerprint"]`.
+    """
+    calibrated = _fingerprints(calibration_records, "calibration")
+    applied = _fingerprints(applied_records, "--apply")
+    if len(calibrated) != 1 or calibrated != applied:
+        raise CalibrationError(
+            f"the --apply results were judged by {sorted(applied)}, but the calibration is "
+            f"for {sorted(calibrated)}. A judge's TPR and TNR only correct that judge's verdicts."
+        )
+    return calibrated.pop()
+
+
+def _fingerprints(records: Sequence[EvalRecord], name: str) -> set[str]:
+    found = {r.meta.get("judge_fingerprint") for r in records}
+    if not found or None in found:
+        raise CalibrationError(
+            f"some {name} results have no judge_fingerprint in meta, so the judge cannot be "
+            "verified. Record the judge's fingerprint with every result."
+        )
+    return {str(f) for f in found}
+
+
+def labeled_checks(labels: Sequence[LabelRecord]) -> list[str]:
+    """Checks that every label record answers."""
+    if not labels:
+        raise CalibrationError("no labels")
+    common = set(labels[0].labels)
+    for label in labels[1:]:
+        common &= set(label.labels)
+    return sorted(common)
 
 
 def split_dev_test(item_ids: Iterable[str], n_dev: int, seed: int = 0) -> Split:
