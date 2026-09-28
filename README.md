@@ -1,7 +1,7 @@
 # llm-eval-harness
 
 A small Python toolkit for LLM evals that stay honest at small sample sizes: one JSONL results format, error bars that fit the data, a binary checklist judge calibrated against human labels, and a CI gate.
-The core needs only numpy and scipy, so the four other repos in this portfolio import it without pulling in a framework.
+The core needs only numpy and scipy, so the four repos planned to build on it can import it without pulling in a framework.
 
 ## Demo output
 
@@ -73,32 +73,41 @@ Regressions (candidate - baseline, paired by item_id). A drop blocks when signif
 ```bash
 git clone https://github.com/rkemery/llm-eval-harness.git
 cd llm-eval-harness
+git fetch origin pull/1/head:pr-1 && git checkout pr-1   # only until PR #1 merges
 uv run llm-eval demo
 ```
 
-`uv run` creates the environment on first use. `make test` runs the test suite and `make lint` runs ruff.
+Until PR #1 merges, `main` holds only the initial commit and the code lives on the PR's branch, which the `git fetch` line checks out. Once it merges and becomes `main` for the v0.1.0 release, skip that line. `uv run` creates the environment on first use. `make test` runs the test suite and `make lint` runs ruff.
+
+Calibrate the synthetic judge against the synthetic labels and correct the baseline's pass rates:
+
+```bash
+uv run llm-eval calibrate --judge examples/synthetic/candidate.jsonl \
+  --labels examples/synthetic/human_labels.jsonl --split examples/synthetic/split.json \
+  --apply examples/synthetic/baseline.jsonl
+```
 
 ## What's in it
 
 | Module | What it does |
 |---|---|
 | `records` | The JSONL results contract (`EvalRecord`). Strict reading and writing. A bad line raises with its file and line number. |
-| `stats` | Wilson and clustered intervals, clustered SEs, paired bootstrap, exact McNemar, MDE, pass^k and pass@k. numpy and scipy only. |
+| `stats` | Wilson intervals (plain and clustered), t intervals with CR1 clustered SEs, paired bootstrap, clustered paired t-test, exact McNemar with an exact-power MDE, pass^k and pass@k. numpy and scipy only. |
 | `analysis` | The same stats applied to lists of records: summarize a run, compare two runs paired by item, pass^k over trials. |
 | `judge` | `ChecklistJudge` (binary, reference-guided, strict JSON) and `PairwiseJudge` (both orders, flip rate). Prompts are plain templates in `prompts/`. |
 | `calibration` | Judge vs human TPR, TNR and Cohen's kappa, the bias-corrected pass rate, and the dev/test split. |
-| `labeling` | Blind, randomized, resumable labeling in the terminal. |
+| `labeling` | Blind, randomized, resumable labeling in the terminal. A resumed session must match the labeler, item set, seed and `--n`. |
 | `gate` | CI gate with hard floors and paired regression checks. Exit code 0 passes, 1 blocks. |
 | `report` | Markdown tables and the MDE line, and rewriting a marked README section. |
-| `client` | `ModelClient` protocol, `FakeClient`, disk cache with a replay-only mode, `DollarCap`, `RetryingClient`. |
+| `client` | `ModelClient` protocol, `FakeClient`, disk cache with a replay-only mode, `DollarCap` (refuses any call that could pass the cap), `RetryingClient`. |
 | `azure` | `FoundryClient` for Azure Foundry over the OpenAI v1 endpoint (extra: `azure`). |
 | `inspect_adapter` | Converts Inspect AI logs to `EvalRecord`s (extra: `inspect`). |
 
 The `llm-eval` CLI wraps these: `stats`, `report`, `label`, `split`, `calibrate`, `gate` and `demo`. Run `llm-eval <command> --help` for the flags.
 
-## How the other repos use it
+## How the planned repos will use it
 
-Each repo pins the harness by git tag, writes its runs in the same JSONL format and gates its PRs with `llm-eval gate`.
+Four more repos are planned to build on the harness. None of them exists yet. Each is to pin the harness by git tag, write its runs in the same JSONL format and gate its PRs with `llm-eval gate`.
 
 ```mermaid
 flowchart LR
@@ -111,7 +120,7 @@ flowchart LR
 
 ## Using it from another repo
 
-Install pinned to a tag:
+Install pinned to a tag. The `v0.1.0` tag is created at release, when PR #1 merges, so until then these commands fail.
 
 ```bash
 uv add "llm-eval-harness @ git+https://github.com/rkemery/llm-eval-harness@v0.1.0"
@@ -155,16 +164,24 @@ uv run llm-eval gate --baseline results/baseline.jsonl --candidate results/candi
   --metric correct --metric hallucination:lower --cluster
 ```
 
-For live runs, stack the clients so the cap sees every call and only cache misses reach Azure. In CI, the same cache runs with `replay_only=True` and no inner client, so a missing entry fails instead of calling a model.
+For live runs, put the cache outermost so repeats cost nothing, and the cap next to the model so it checks every attempt that reaches Azure. `DollarCap` refuses any call whose worst-case cost could take spend past the cap, which is why every request needs `max_output_tokens`. In CI, the same cache runs with `replay_only=True` and no inner client, so a missing entry fails instead of calling a model.
 
 ```python
-from llm_eval_harness import CachedClient, DollarCap, RetryingClient
+from llm_eval_harness import CachedClient, DollarCap, ModelRequest, RetryingClient
 from llm_eval_harness.azure import FoundryClient, retryable_errors
 
-client = DollarCap(
-    CachedClient(RetryingClient(FoundryClient(), retryable_errors()), "cache/"),
-    cap_usd=5.00,
+client = CachedClient(
+    RetryingClient(DollarCap(FoundryClient(), cap_usd=5.00), retryable_errors()),
+    "cache/",
 )
+
+# pass^k needs k independent samples of the same prompt. `trial` is part of the cache
+# key and is not sent to the model. Without it, trials 2..k would replay trial 1's reply
+# from the cache and pass^k would equal pass^1.
+replies = [
+    client.complete(ModelRequest(model="gpt-6-luna", input=prompt, max_output_tokens=800, trial=t))
+    for t in range(5)
+]
 ```
 
 `FoundryClient` reads `AZURE_OPENAI_BASE_URL` (required, your Foundry resource's `/openai/v1/` endpoint) and uses `AZURE_OPENAI_API_KEY` if it is set. Otherwise it signs in with Entra ID through `DefaultAzureCredential`, with the scope from `AZURE_OPENAI_TOKEN_SCOPE` (default `https://cognitiveservices.azure.com/.default`).
@@ -183,45 +200,54 @@ One JSON object per line, one line per item per run. Repeated trials of the same
 | `cluster` | str or null | For example the source article, used for clustered CIs. |
 | `tokens_in`, `tokens_out`, `reasoning_tokens` | int | `tokens_out` includes reasoning tokens, as the OpenAI `usage` object reports them. |
 | `cost_usd`, `latency_ms` | float | Per item. |
-| `error` | str or null | Set when something failed. A record with no scores must have one. |
+| `error` | str or null | Set when something failed. A record with no scores must have one. An errored record's latency, cost and token counts are left out of means, since they hold 0 or a timeout rather than a measurement. |
 | `meta` | dict | Free-form. The judge stores its fingerprint here. |
 
 ## Design decisions
 
-- **Wilson intervals for pass rates.** Normal intervals undercover badly below a few hundred items and collapse to zero width at 0% or 100% (Bowyer et al., [arXiv 2503.01747](https://arxiv.org/abs/2503.01747)). Every pass rate gets a Wilson interval. When items are clustered, the Wilson interval uses the design-effect sample size n / deff, an idea from Korn and Graubard (1998).
-- **Clustered standard errors.** Questions about the same source article are not independent. Means use Miller's clustered SE (Miller, "Adding Error Bars to Evals", [arXiv 2411.00640](https://arxiv.org/abs/2411.00640)), which falls back to the ordinary s / sqrt(n) when every item is its own cluster.
-- **Paired comparisons.** Two runs on the same items are compared item by item: a paired bootstrap CI on the mean difference (resampling whole clusters when asked) and an exact McNemar test for pass/fail metrics. Pairing removes the between-item variance that an unpaired comparison carries (Miller 2024).
-- **An MDE line with every result.** Each table says how big a difference it could have detected at 80% power and alpha 0.05, so a null result reads as "too small to see at this n" rather than "no effect". The formulas are normal approximations and are written out in `stats.py`.
-- **pass^k for repeated trials.** pass^k = C(c, k) / C(n, k) measures whether an agent succeeds every time, not just once (tau-bench, [arXiv 2406.12045](https://arxiv.org/abs/2406.12045)). pass@k is reported next to it (Chen et al., [arXiv 2107.03374](https://arxiv.org/abs/2107.03374)).
-- **Binary, reference-guided checklist judge.** Yes/no questions instead of a 1 to 5 scale (CheckEval, EMNLP 2025, [arXiv 2403.18771](https://arxiv.org/abs/2403.18771)), with the gold reference in the prompt (Zheng et al., [arXiv 2306.05685](https://arxiv.org/abs/2306.05685)). The reply must be strict JSON. A reply that does not parse becomes an error on the record and never a pass.
+- **Wilson intervals for pass rates.** Normal intervals undercover badly below a few hundred items and collapse to zero width at 0% or 100% (Bowyer et al., [arXiv 2503.01747](https://arxiv.org/abs/2503.01747)). Every pass rate gets a Wilson interval. When items are clustered, the Wilson interval uses the Korn-Graubard effective sample size, n / deff × (z / t<sub>G-1</sub>)², with the design effect floored at 1 (Korn and Graubard 1998).
+- **Clustered standard errors with few-cluster corrections.** Questions about the same source article are not independent, and Miller ("Adding Error Bars to Evals", [arXiv 2411.00640](https://arxiv.org/abs/2411.00640)) recommends clustered SEs for evals. Means use the CR1 cluster-robust SE (with the G / (G - 1) factor) and a t quantile on G - 1 degrees of freedom, which falls back to s / sqrt(n) with n - 1 df when every item is its own cluster. The design effect is floored at 1, so clustering can widen an interval but never narrow it. At the demo's 8 clusters these intervals covered 95 to 97% in simulation, and `tests/test_stats.py` checks at least 93%.
+- **Paired comparisons.** Two runs on the same items are compared item by item, which removes the between-item variance that an unpaired comparison carries (Miller 2024). Without clustering, the CI is a paired bootstrap and pass/fail metrics get the exact McNemar test. With clustering, every metric gets a t-test on the per-item differences with the CR1 SE and G - 1 df, whose CI and p-value always agree.
+- **An MDE line with every result.** Each table says how big a difference it could have detected at 80% power and alpha 0.05, so a null result reads as "too small to see at this n" rather than "no effect". For an unclustered pass/fail comparison the MDE is the smallest difference the exact McNemar test detects with 80% power at the observed discordant rate. It is computed exactly and checked by simulation in the tests. It never exceeds the discordant rate, and it reads n/a when no difference that large is detectable. The other MDEs are normal or t approximations, written out in `stats.py`.
+- **pass^k for repeated trials.** pass^k = C(c, k) / C(n, k) measures whether an agent succeeds every time, not just once (tau-bench, [arXiv 2406.12045](https://arxiv.org/abs/2406.12045)). pass@k is reported next to it (Chen et al., [arXiv 2107.03374](https://arxiv.org/abs/2107.03374)). Each trial is a separate run, and live trials pass a `trial` index so the cache keeps them apart.
+- **Binary, reference-guided checklist judge.** Yes/no questions instead of a 1 to 5 scale (CheckEval, EMNLP 2025, [arXiv 2403.18771](https://arxiv.org/abs/2403.18771)), with the gold reference in the prompt (Zheng et al., [arXiv 2306.05685](https://arxiv.org/abs/2306.05685)). The reply must be strict JSON with no duplicate keys. A reply that does not parse becomes an error on the record and never a pass.
 - **Pairwise judge in both orders.** LLM judges favor a position (Zheng et al.). The pairwise judge asks twice with the answers swapped. If the verdict changes, it counts as a tie, and the flip rate is reported with a Wilson interval.
-- **Calibrated judge, corrected pass rate.** Judge TPR and TNR come with Wilson intervals and Cohen's kappa with a bootstrap interval. The judge's pass rate on unlabeled data is corrected with Rogan-Gladen, theta = (p + TNR - 1) / (TPR + TNR - 1). Lee et al. ([arXiv 2511.21140](https://arxiv.org/abs/2511.21140)) show why the CI has to carry the uncertainty in TPR and TNR too, so the bootstrap resamples the calibration labels as well as the test set.
-- **Freeze the judge before test labels.** `llm-eval split` makes a seeded dev/test split. The judge prompt is tuned on dev labels only. Every judge result stores a fingerprint of the model, prompt, checklist and settings, and calibration refuses results from more than one fingerprint.
-- **Uniform labels for agreement, disagreement labels for bugs.** The labeling CLI samples uniformly at random by default. `--mode disagreement` shows only items where two judges disagree, which is useful for finding judge bugs but biased toward hard cases, so those labels are tagged and calibration refuses them.
-- **Two kinds of CI block.** Hard floors (a PII leak, a canary leak) fail on a single violation, and an errored record that never got checked counts as a failure. Metric regressions block only when the upper bound of the paired 95% CI for candidate minus baseline is below zero. A drop that the CI cannot confirm prints a warning with the MDE and does not block.
-- **Cache, replay, and a dollar cap.** Responses are cached on disk under the sha256 of the canonical request JSON. CI replays the cache with no client behind it. `DollarCap` prices each call from its `usage` (reasoning tokens bill as output) and refuses the next call once the cap is reached. SDK retries are off (`max_retries=0`) in favor of `RetryingClient`, whose backoff is visible and tested.
-- **No temperature on gpt-6.** The gpt-6 deployments reject any non-default temperature, so the Foundry client raises if one is set for them. The cross-family judge is Llama 3.3 70B, which accepts temperature 0.
+- **Calibrated judge, corrected pass rate.** Judge TPR and TNR come with Wilson intervals and Cohen's kappa with a bootstrap interval. The judge's pass rate on unlabeled data is corrected with Rogan-Gladen, theta = (p + TNR - 1) / (TPR + TNR - 1). Lee et al. ([arXiv 2511.21140](https://arxiv.org/abs/2511.21140)) show why the CI has to carry the uncertainty in TPR and TNR too. Each bootstrap replicate resamples the test set and draws TPR and TNR from their Beta (Jeffreys) posteriors given the labeled counts, which keeps that uncertainty even when the judge agreed with every labeled pass. Replicates where TPR + TNR <= 1 are dropped and counted in the output.
+- **Freeze the judge before test labels.** `llm-eval split` makes a seeded dev/test split. The judge prompt is tuned on dev labels only, and `llm-eval calibrate` requires the split and scores the test part. Every judge result stores a fingerprint of the model, prompt, checklist and settings. Calibration refuses results from more than one fingerprint, and `calibrate --apply` refuses results from a different judge than the one calibrated.
+- **Uniform labels for agreement, disagreement labels for bugs.** The labeling CLI samples uniformly at random by default. `--mode disagreement` shows only items where two judges disagree, which is useful for finding judge bugs but biased toward hard cases, so those labels are tagged and calibration refuses them. Each label records its labeler, seed, item set and target size, and a resumed session that changes any of them is refused, so one file is one random sample by one person.
+- **Two kinds of CI block, one rule each.** Hard floors (a PII leak, a canary leak) fail on a single violation. An errored record that was never checked counts as a failure, and so does a floor that checked no records. A metric regression blocks only when the drop is significant at the 5% level, by one test per metric: exact McNemar for pass/fail without clustering, the clustered t-test with `--cluster`, and the paired bootstrap CI for numeric metrics without clustering. Each gate line prints the statistic its decision used. A drop that is not significant prints a warning with the MDE and does not block. With `--on-error exclude`, the gate also blocks when more than 5% of the items had to be excluded (`--max-excluded`).
+- **Cache, replay, and a dollar cap.** Responses are cached on disk under the sha256 of the canonical request JSON, which includes the trial index. Only complete replies are cached, so a truncated one is never replayed. CI replays the cache with no client behind it. Before each call, `DollarCap` computes the most the call could cost, from `max_output_tokens` and a byte bound on input tokens at list prices, and refuses it if that could take spend past the cap. After the call it adds the real cost from `usage`, where reasoning tokens bill as output. SDK retries are off (`max_retries=0`) in favor of `RetryingClient`, whose backoff is visible and tested.
+- **Default temperature only on gpt-6.** The gpt-6 deployments accept only the default temperature, 1.0, so the Foundry client raises for any other value. The cross-family judge is Llama 3.3 70B, which accepts temperature 0.
 
 ## What didn't work
 
-- A clustered normal interval for pass rates. On the demo's `pii_leak` row (0 of 40) it printed "0.0% to 0.0%", which is exactly the failure Bowyer et al. describe. Pass rates now always use Wilson, with the design-effect sample size when clustered, and that row reads 0.0% to 8.8%.
+- A clustered normal interval for pass rates. On the demo's `pii_leak` row (0 of 40) it printed "0.0% to 0.0%", which is exactly the failure Bowyer et al. describe. Pass rates now always use Wilson, clustered with the Korn-Graubard effective n, and that row reads 0.0% to 12.3%.
+- Clustered SEs with no small-sample correction and z quantiles, at 8 clusters. In simulation the clustered mean CI covered about 88%, the design-effect Wilson interval 90 to 92%, and the percentile cluster bootstrap for paired differences 88%. The CR1 factor, t quantiles on G - 1 df and the Korn-Graubard adjustment brought them to 95 to 97%. The cluster bootstrap is gone from paired comparisons.
+- A normal-approximation paired MDE. It could exceed the discordant rate, which no real difference can: it printed 17.2 points at n = 40 with 15% of pairs discordant, where even the largest possible difference, 15 points, has only 57% power under the exact McNemar test. Where it was attainable, its exact power ran from 77 to 81% instead of 80%. The MDE now comes from the exact test's power, and that n = 40 case reads n/a.
+- Blocking on the bootstrap CI while printing the McNemar p-value. With 4 of 40 items regressing, the gate printed `[BLOCK]` next to p = 0.125. Each metric now has one test, and the gate prints that test.
+- Resampling the labeled pairs to carry calibration uncertainty. When the judge passed every human pass, TPR* was 1 in every replicate. In a seeded simulation where the true TPR was 0.9 but the judge passed all 10 labeled passes, the interval covered 79%. Beta posterior draws brought it to 97%.
+- Fail-open corners in the gate: an empty candidate run passed its floors, and with `--on-error exclude` a candidate that errored on half the items passed on the other half. Both block now.
 
 ## Limitations
 
-- The percentile bootstrap undercovers with few clusters. The demo has 8, so its clustered intervals are on the optimistic side.
-- Means of continuous metrics (latency, cost) use a normal interval, which is rough for skewed data at small n.
-- The exact McNemar test treats items as independent, even when the bootstrap next to it resamples clusters. With strongly clustered items its p-value is too small.
-- The MDE formulas are normal approximations. The paired binary MDE drops a delta^2 term, which makes it slightly conservative.
+- The clustered intervals rest on t approximations with G - 1 degrees of freedom. They covered 95 to 97% at 8 equal-sized clusters in simulation. With fewer clusters (below about 5) or very unequal cluster sizes, expect less. The Korn-Graubard Wilson interval leans conservative.
+- The design effect is floored at 1. Real negative correlation within clusters, which would narrow an interval, is ignored on purpose.
+- The exact McNemar test assumes independent pairs, so it is only used without `--cluster`. With `--cluster`, pass/fail comparisons use the clustered t-test, whose t reference is itself approximate for differences that only take the values -1, 0 and 1.
+- Without clustering, the comparison table shows a bootstrap CI next to the exact McNemar p-value, and they can disagree when only a few pairs are discordant (4 of 40 regressing: the CI excludes 0, but p = 0.125). The gate decides on the p-value.
+- The paired binary MDE holds the discordant rate at its observed value. The unpaired MDE against a same-size run and the clustered MDE are normal and t approximations.
+- The corrected pass rate still resamples the test side with a percentile bootstrap, over clusters when `--cluster` is given (the demo does this), and that undercovers with few clusters. Dropping replicates where TPR* + TNR* <= 1 conditions the interval on an informative judge. The count is printed, and if it is more than a few percent of the replicates, the interval means little.
+- Means of continuous metrics (latency, cost) use a t interval, which is rough for skewed data at small n.
 - The Rogan-Gladen correction assumes the judge's TPR and TNR on the labeled answers carry over to the answers being corrected. The demo calibrates on candidate answers and corrects the baseline, which leans on that assumption.
 - One human labeler means no inter-rater agreement. The plan's intra-rater relabel check is not automated here.
-- `DollarCap` checks before each call, so spend can pass the cap by one call. It is not thread-safe. Prices are list prices as of 2026-09-28 and are hard-coded.
+- With `--on-error exclude`, the gate lets up to 5% of items be excluded by default. If errors hit hard items more often, those exclusions can still hide part of a regression.
+- `DollarCap` keeps spend under the cap only if the provider bills at most one input token per UTF-8 byte of the request (plus 64 for chat formatting) and at most `max_output_tokens` output tokens. Images or files referenced by URL in `extra` break that bound. The bound is conservative, so a cap can refuse a call while real headroom remains. It is not thread-safe. Prices are list prices as of 2026-09-28 and are hard-coded.
 - The cache key does not include a deployment's model version. If a deployment is upgraded in place, clear the cache.
 - The Azure client is tested with the SDK mocked, plus a check that every SDK name it uses exists in the installed `openai` package. Live key and Entra ID auth are not exercised by these tests.
 - The Inspect adapter is tested against inspect-ai 0.3.271 only.
 
 ## Cost
 
-The demo and the test suite make no model calls and cost $0. Live runs happen in the other four repos, and their READMEs report what they cost.
+The demo and the test suite make no model calls and cost $0. Live runs will happen in the four planned repos, and their READMEs will report what they cost.
 
 ## Development
 
