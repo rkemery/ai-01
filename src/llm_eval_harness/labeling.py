@@ -7,6 +7,11 @@ re-running with the same seed resumes the same sequence. Each label is appended
 and flushed as soon as an item is finished, so quitting or crashing loses at
 most the item in progress.
 
+Every label records what sample it belongs to: the labeler, the sampling mode,
+the seed, a hash of the item ids the order was drawn from, and the target size
+(--n). A resumed session must match all five, so one labels file never mixes
+two samples or two people.
+
 Sampling modes:
 
 - uniform (default): a seeded random order over all items. Use these labels to
@@ -18,9 +23,11 @@ Sampling modes:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-from collections.abc import Callable, Iterator, Sequence
+import re
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,8 +38,9 @@ import numpy as np
 from llm_eval_harness.judge import Checklist
 from llm_eval_harness.records import EvalRecord, metric_column
 
-LABEL_SCHEMA_VERSION = 1
+LABEL_SCHEMA_VERSION = 2
 Sampling = Literal["uniform", "disagreement"]
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class LabelError(ValueError):
@@ -41,7 +49,12 @@ class LabelError(ValueError):
 
 @dataclass(kw_only=True)
 class LabelRecord:
-    """One human's yes/no answers to every checklist question for one item."""
+    """One human's yes/no answers to every checklist question for one item.
+
+    `items_sha256` (see `items_fingerprint`) and `n_target` identify the sample
+    the item was drawn for: the pool of item ids that was shuffled, and how
+    many of the shuffled order were to be labeled.
+    """
 
     schema_version: int = LABEL_SCHEMA_VERSION
     item_id: str
@@ -49,6 +62,8 @@ class LabelRecord:
     labeler: str
     sampling: Sampling
     seed: int
+    items_sha256: str
+    n_target: int
     created_at: str
 
     def __post_init__(self) -> None:
@@ -67,6 +82,10 @@ class LabelRecord:
             raise LabelError(f"sampling must be one of {get_args(Sampling)}, got {self.sampling!r}")
         if type(self.seed) is not int:
             raise LabelError(f"seed must be an int, got {self.seed!r}")
+        if not isinstance(self.items_sha256, str) or not _SHA256.match(self.items_sha256):
+            raise LabelError(f"items_sha256 must be a sha256 hex digest, got {self.items_sha256!r}")
+        if type(self.n_target) is not int or self.n_target < 1:
+            raise LabelError(f"n_target must be a positive int, got {self.n_target!r}")
 
 
 @dataclass(frozen=True)
@@ -144,6 +163,11 @@ def read_items(path: str | Path) -> list[LabelItem]:
     return items
 
 
+def items_fingerprint(item_ids: Iterable[str]) -> str:
+    """sha256 of the sorted item ids, one per line. Order-independent."""
+    return hashlib.sha256("\n".join(sorted(item_ids)).encode("utf-8")).hexdigest()
+
+
 def uniform_order(items: Sequence[LabelItem], seed: int) -> list[LabelItem]:
     """Seeded shuffle of the items sorted by id, so input order does not matter."""
     ordered = sorted(items, key=lambda item: item.item_id)
@@ -196,16 +220,29 @@ def run_session(
     """Label items in order, skipping ones already in `out_path`.
 
     `limit` caps the sample at the first `limit` items of the order, so a
-    resumed session with the same seed and limit finishes the same sample.
-    Typing q (or end of input) stops after saving everything finished so far.
+    resumed session with the same items, seed and limit finishes the same
+    sample. Resuming with a different item set, limit, labeler, sampling mode
+    or seed raises `LabelError` before anything is shown. Typing q (or end of
+    input) stops after saving everything finished so far.
     """
+    if limit is not None and (type(limit) is not int or limit < 1):
+        raise ValueError(f"limit must be a positive int, got {limit!r}")
     out_path = Path(out_path)
-    existing = read_labels(out_path) if out_path.exists() else []
-    _check_compatible(existing, checklist, sampling, seed, out_path)
     target = list(ordered if limit is None else ordered[:limit])
+    if not target:
+        raise LabelError("no items to label")
+    sample = _Sample(
+        labeler=labeler,
+        sampling=sampling,
+        seed=seed,
+        items_sha256=items_fingerprint(item.item_id for item in ordered),
+        n_target=len(target),
+    )
+    existing = read_labels(out_path) if out_path.exists() else []
+    _check_compatible(existing, checklist, sample, target, out_path)
     done = {record.item_id for record in existing}
     todo = [item for item in target if item.item_id not in done]
-    total = len(done & {item.item_id for item in target})
+    total = len(done)
     print_fn(f"{total} of {len(target)} labeled. {len(todo)} to go. Type q to stop.")
     labeled_now = 0
     for item in todo:
@@ -219,9 +256,11 @@ def run_session(
             LabelRecord(
                 item_id=item.item_id,
                 labels=labels,
-                labeler=labeler,
-                sampling=sampling,
-                seed=seed,
+                labeler=sample.labeler,
+                sampling=sample.sampling,
+                seed=sample.seed,
+                items_sha256=sample.items_sha256,
+                n_target=sample.n_target,
                 created_at=datetime.now(UTC).isoformat(timespec="seconds"),
             ),
         )
@@ -231,24 +270,54 @@ def run_session(
     return SessionResult(labeled_now, total, len(target), stopped_early=False)
 
 
+@dataclass(frozen=True)
+class _Sample:
+    labeler: str
+    sampling: Sampling
+    seed: int
+    items_sha256: str
+    n_target: int
+
+
 def _check_compatible(
     existing: Sequence[LabelRecord],
     checklist: Checklist,
-    sampling: Sampling,
-    seed: int,
+    sample: _Sample,
+    target: Sequence[LabelItem],
     path: Path,
 ) -> None:
+    fix = "Resume with the same settings, or use a new labels file."
     for record in existing:
-        if record.sampling != sampling or record.seed != seed:
+        if record.labeler != sample.labeler:
+            raise LabelError(
+                f"{path} holds labels by labeler {record.labeler!r}, not {sample.labeler!r}. "
+                "One labels file holds one labeler, so agreement between labelers can be "
+                "measured. Use a new labels file."
+            )
+        if record.sampling != sample.sampling or record.seed != sample.seed:
             raise LabelError(
                 f"{path} was started with sampling={record.sampling!r} seed={record.seed}, "
-                f"not sampling={sampling!r} seed={seed}. Use a new labels file."
+                f"not sampling={sample.sampling!r} seed={sample.seed}. {fix}"
+            )
+        if record.items_sha256 != sample.items_sha256:
+            raise LabelError(
+                f"{path} was started on a different item set (items_sha256 "
+                f"{record.items_sha256[:12]}..., now {sample.items_sha256[:12]}...). Adding or "
+                f"removing items reshuffles the order, so the labels would not be one random "
+                f"sample. {fix}"
+            )
+        if record.n_target != sample.n_target:
+            raise LabelError(
+                f"{path} was started with --n {record.n_target}, not --n {sample.n_target}. {fix}"
             )
         if set(record.labels) != set(checklist.ids):
             raise LabelError(
                 f"{path} has labels for {sorted(record.labels)}, "
                 f"but the checklist asks {sorted(checklist.ids)}"
             )
+    outside = sorted({r.item_id for r in existing} - {item.item_id for item in target})
+    if outside:
+        raise LabelError(f"{path} has labels for items outside this sample: {outside[:5]}. {fix}")
 
 
 def _show_item(item: LabelItem, position: int, total: int, print_fn: Callable[[str], None]) -> None:

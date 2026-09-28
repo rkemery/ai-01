@@ -133,6 +133,8 @@ def label(item_id: str, correct: bool, sampling: str = "uniform") -> LabelRecord
         labeler="t",
         sampling=sampling,  # type: ignore[arg-type]
         seed=0,
+        items_sha256="0" * 64,
+        n_target=1,
         created_at="2026-09-28T00:00:00+00:00",
     )
 

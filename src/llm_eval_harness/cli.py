@@ -106,7 +106,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, required=True, help="labels JSONL (appended, resumable)")
     p.add_argument("--labeler", required=True)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--n", type=int, help="label only the first N items of the shuffled order")
+    p.add_argument(
+        "--n", type=_positive_int, help="label only the first N items of the shuffled order"
+    )
     p.add_argument("--mode", choices=["uniform", "disagreement"], default="uniform")
     p.add_argument("--judge-a", type=Path, help="first judge results (disagreement mode)")
     p.add_argument("--judge-b", type=Path, help="second judge results (disagreement mode)")
@@ -386,6 +388,16 @@ def _metric_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--cluster", action="store_true", help="clustered CIs using record.cluster")
     p.add_argument("--on-error", choices=["raise", "exclude"], default="raise")
     _boot_args(p)
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value}")
+    return value
 
 
 def _boot_args(p: argparse.ArgumentParser) -> None:

@@ -14,6 +14,7 @@ from llm_eval_harness.judge import (
     PairwiseJudge,
     load_checklist,
     parse_checklist_reply,
+    parse_pairwise_reply,
     summarize_pairwise,
 )
 
@@ -161,3 +162,23 @@ def test_pairwise_parse_error_raises() -> None:
     fake = FakeClient([json.dumps({"winner": "A", "reason": "r"})])
     with pytest.raises(JudgeParseError, match="winner"):
         PairwiseJudge(fake, "gpt-5-mini").compare("q", "a", "b", "r")
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # Review finding: the second "correct" turned a fail into a pass.
+        '{"correct": {"pass": false, "reason": "x"}, "grounded": {"pass": true, "reason": "y"}, '
+        '"correct": {"pass": true, "reason": "z"}}',
+        '{"correct": {"pass": false, "pass": true, "reason": "x"}, '
+        '"grounded": {"pass": true, "reason": "y"}}',
+    ],
+)
+def test_duplicate_keys_are_rejected(reply: str) -> None:
+    with pytest.raises(JudgeParseError, match=r"duplicate key '(correct|pass)'"):
+        parse_checklist_reply(reply, ["correct", "grounded"])
+
+
+def test_pairwise_duplicate_keys_are_rejected() -> None:
+    with pytest.raises(JudgeParseError, match="duplicate key 'winner'"):
+        parse_pairwise_reply('{"winner": "1", "reason": "", "winner": "2"}')

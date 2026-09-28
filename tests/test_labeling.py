@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from helpers import record
 
+from llm_eval_harness.cli import main
 from llm_eval_harness.judge import Checklist, ChecklistItem
 from llm_eval_harness.labeling import (
     LabelError,
@@ -14,6 +15,7 @@ from llm_eval_harness.labeling import (
     Sampling,
     SessionResult,
     disagreeing_items,
+    items_fingerprint,
     labeling_order,
     read_items,
     read_labels,
@@ -178,12 +180,14 @@ def test_disagreement_sampling_selects_only_disagreements() -> None:
 def test_read_labels_is_strict(tmp_path: Path) -> None:
     path = tmp_path / "labels.jsonl"
     good = {
-        "schema_version": 1,
+        "schema_version": 2,
         "item_id": "q1",
         "labels": {"correct": True},
         "labeler": "rk",
         "sampling": "uniform",
         "seed": 0,
+        "items_sha256": items_fingerprint(["q1"]),
+        "n_target": 1,
         "created_at": "2026-09-28T00:00:00+00:00",
     }
     path.write_text(json.dumps(good) + "\n" + json.dumps(good) + "\n")
@@ -195,6 +199,12 @@ def test_read_labels_is_strict(tmp_path: Path) -> None:
     path.write_text(json.dumps({**good, "sampling": "adaptive"}) + "\n")
     with pytest.raises(LabelError, match="sampling"):
         read_labels(path)
+    path.write_text(json.dumps({**good, "n_target": 0}) + "\n")
+    with pytest.raises(LabelError, match="n_target"):
+        read_labels(path)
+    path.write_text(json.dumps({**good, "schema_version": 1}) + "\n")
+    with pytest.raises(LabelError, match="schema_version"):
+        read_labels(path)
 
 
 def test_read_items_requires_text_fields(tmp_path: Path) -> None:
@@ -205,3 +215,80 @@ def test_read_items_requires_text_fields(tmp_path: Path) -> None:
     path.write_text(json.dumps({"item_id": 1, "question": "Q", "answer": "A"}) + "\n")
     with pytest.raises(LabelError, match="item_id must be a string"):
         read_items(path)
+
+
+# Review finding: resuming must not mix item sets, sample sizes or labelers.
+
+POOL = [LabelItem(f"q{i:02d}", "Q", "A") for i in range(20)]
+ONE = Checklist(name="one", items=(ChecklistItem("ok", "ok?"),))
+
+
+def _label(out: Path, items: list[LabelItem], answers: list[str], **kw: object) -> SessionResult:
+    input_fn, _ = scripted(answers)
+    options: dict = {"labeler": "alice", "sampling": "uniform", "seed": 0, "limit": 5, **kw}
+    return run_session(
+        labeling_order(items, seed=0),
+        ONE,
+        out,
+        input_fn=input_fn,
+        print_fn=lambda s: None,
+        **options,
+    )
+
+
+def test_resume_refuses_a_changed_item_set(tmp_path: Path) -> None:
+    out = tmp_path / "labels.jsonl"
+    _label(out, POOL, ["y", "n", "y", "q"])
+    assert len(read_labels(out)) == 3
+    with pytest.raises(LabelError, match="different item set"):
+        _label(out, [*POOL, LabelItem("q20", "Q", "A")], ["y"] * 10)
+    assert len(read_labels(out)) == 3
+
+
+def test_resume_refuses_a_changed_n(tmp_path: Path) -> None:
+    out = tmp_path / "labels.jsonl"
+    _label(out, POOL, ["y", "q"])
+    with pytest.raises(LabelError, match="--n 5"):
+        _label(out, POOL, ["y"] * 10, limit=6)
+    with pytest.raises(LabelError, match="--n 5"):
+        _label(out, POOL, ["y"] * 10, limit=None)
+
+
+def test_resume_refuses_another_labeler(tmp_path: Path) -> None:
+    out = tmp_path / "labels.jsonl"
+    _label(out, POOL, ["y", "q"])
+    with pytest.raises(LabelError, match="labeler 'alice'"):
+        _label(out, POOL, ["y"] * 10, labeler="bob")
+
+
+def test_matching_resume_finishes_the_same_sample(tmp_path: Path) -> None:
+    out = tmp_path / "labels.jsonl"
+    _label(out, POOL, ["y", "n", "q"])
+    result = _label(out, POOL, ["y"] * 10)
+    labels = read_labels(out)
+    assert result.total_labeled == 5
+    assert [r.item_id for r in labels] == [i.item_id for i in labeling_order(POOL, 0)[:5]]
+    assert {(r.labeler, r.n_target) for r in labels} == {("alice", 5)}
+
+
+def test_limit_must_be_positive(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(ValueError, match="limit must be"):
+        _label(tmp_path / "labels.jsonl", POOL, [], limit=-5)
+    with pytest.raises(SystemExit) as info:
+        main(
+            [
+                "label",
+                "--items",
+                "x",
+                "--checklist",
+                "y",
+                "--out",
+                "z",
+                "--labeler",
+                "a",
+                "--n",
+                "-5",
+            ]
+        )
+    assert info.value.code == 2
+    assert "--n" in capsys.readouterr().err

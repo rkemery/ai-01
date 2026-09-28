@@ -6,7 +6,8 @@ checklist questions gives more consistent and more explainable judgments than
 Likert scales. The gold reference answer goes into the prompt, which is the
 reference-guided setup from Zheng et al. (2023, arXiv 2306.05685).
 
-Replies must be strict JSON. Anything else raises `JudgeParseError`.
+Replies must be strict JSON, with no duplicate keys. Anything else raises
+`JudgeParseError`.
 `ChecklistJudge.score` turns that into an error on the result, so a garbled
 reply never counts as a pass.
 """
@@ -21,7 +22,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from string import Template
-from typing import Literal
+from typing import Any, Literal
 
 from llm_eval_harness.client import ModelClient, ModelRequest, ModelResponse
 from llm_eval_harness.stats import Interval, wilson_interval
@@ -365,15 +366,37 @@ def summarize_pairwise(verdicts: Sequence[PairwiseVerdict]) -> PairwiseSummary:
     )
 
 
+class _DuplicateKey(ValueError):
+    pass
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """`object_pairs_hook` that rejects duplicate keys instead of keeping the last one."""
+    data: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in data:
+            raise _DuplicateKey(key)
+        data[key] = value
+    return data
+
+
 def _load_json_object(text: str) -> dict:
+    """Parse the reply as one JSON object. Duplicate keys at any depth are an error.
+
+    Python's json keeps the last of two equal keys, so a reply with "correct"
+    twice would be scored by whichever came second, and a fail could become a
+    pass. The judge was asked for one verdict per check, so two is malformed.
+    """
     body = text.strip()
     fenced = _FENCE.match(body)
     if fenced:
         body = fenced.group(1)
     try:
-        data = json.loads(body)
+        data = json.loads(body, object_pairs_hook=_unique_keys)
     except json.JSONDecodeError as exc:
         raise JudgeParseError(f"reply is not valid JSON ({exc.msg})", raw=text) from exc
+    except _DuplicateKey as exc:
+        raise JudgeParseError(f"reply has a duplicate key {exc.args[0]!r}", raw=text) from exc
     if not isinstance(data, dict):
         raise JudgeParseError(f"reply must be a JSON object, got {type(data).__name__}", raw=text)
     return data

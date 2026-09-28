@@ -24,7 +24,7 @@ import numpy as np
 from llm_eval_harness.calibration import save_split, split_dev_test
 from llm_eval_harness.client import DEFAULT_PRICES, FakeClient, ModelResponse, cost_usd
 from llm_eval_harness.judge import Checklist, ChecklistItem, ChecklistJudge
-from llm_eval_harness.labeling import LabelRecord
+from llm_eval_harness.labeling import LabelRecord, items_fingerprint
 from llm_eval_harness.records import EvalRecord, write_records
 
 SEED = 20260928
@@ -287,6 +287,7 @@ def main(out_dir: Path) -> None:
             }
             fh.write(json.dumps(row) + "\n")
 
+    item_ids = [item["item_id"] for item in items]
     with (out_dir / "human_labels.jsonl").open("w", encoding="utf-8") as fh:
         for item in items:
             truth = candidate_truth[item["item_id"]]
@@ -296,6 +297,8 @@ def main(out_dir: Path) -> None:
                 labeler="synthetic-human",
                 sampling="uniform",
                 seed=SEED,
+                items_sha256=items_fingerprint(item_ids),
+                n_target=len(item_ids),
                 created_at="2026-09-28T00:00:00+00:00",
             )
             fh.write(json.dumps(asdict(label)) + "\n")
