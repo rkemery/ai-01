@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from helpers import record, run
+
+from llm_eval_harness.analysis import summarize_metric
+from llm_eval_harness.gate import Floor, check_floor
+from llm_eval_harness.records import (
+    EvalRecord,
+    MissingScoreError,
+    RecordError,
+    metric_column,
+    read_records,
+    write_records,
+)
+
+
+def test_roundtrip(tmp_path: Path) -> None:
+    records = [
+        record("q1", cluster="art-1", tokens_in=10, tokens_out=5, reasoning_tokens=2),
+        record("q2", scores={"correct": False, "f1": 0.5}, meta={"note": "x"}),
+    ]
+    path = tmp_path / "out" / "results.jsonl"
+    assert write_records(path, records) == 2
+    assert read_records(path) == records
+
+
+def test_append_mode_adds_lines(tmp_path: Path) -> None:
+    path = tmp_path / "r.jsonl"
+    write_records(path, [record("q1")])
+    write_records(path, [record("q2")], append=True)
+    assert [r.item_id for r in read_records(path)] == ["q1", "q2"]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"run_id": ""}, "run_id"),
+        ({"model": None}, "model"),
+        ({"scores": {"correct": float("nan")}}, "finite"),
+        ({"scores": {"correct": "yes"}}, "bool or a finite number"),
+        ({"scores": {"latency_ms": 1.0}}, "collides"),
+        ({"scores": {}}, "must carry an error"),
+        ({"tokens_in": -1}, "tokens_in"),
+        ({"tokens_out": True}, "tokens_out"),
+        ({"tokens_out": 3, "reasoning_tokens": 4}, "cannot exceed"),
+        ({"cost_usd": -0.1}, "cost_usd"),
+        ({"latency_ms": float("inf")}, "latency_ms"),
+        ({"cluster": ""}, "cluster"),
+        ({"error": ""}, "error"),
+        ({"schema_version": 2}, "schema_version"),
+        ({"meta": {1: "x"}}, "meta"),
+    ],
+)
+def test_validation_rejects_bad_records(overrides: dict, message: str) -> None:
+    with pytest.raises(RecordError, match=message):
+        record(**overrides)
+
+
+def test_errored_record_may_have_no_scores() -> None:
+    r = record(scores={}, error="JudgeParseError: not JSON")
+    assert r.error is not None
+
+
+def _write_lines(path: Path, lines: list[str]) -> None:
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _good_line(item_id: str = "q1", **overrides: object) -> str:
+    data = record(item_id).to_dict()
+    data.update(overrides)
+    return json.dumps(data)
+
+
+def test_read_reports_file_and_line_for_invalid_json(tmp_path: Path) -> None:
+    path = tmp_path / "r.jsonl"
+    _write_lines(path, [_good_line(), "{not json"])
+    with pytest.raises(RecordError, match=r"r\.jsonl:2: invalid JSON"):
+        read_records(path)
+
+
+def test_read_rejects_unknown_and_missing_fields(tmp_path: Path) -> None:
+    path = tmp_path / "r.jsonl"
+    _write_lines(path, [_good_line(extra_field=1)])
+    with pytest.raises(RecordError, match="unknown fields"):
+        read_records(path)
+    data = record().to_dict()
+    del data["schema_version"]
+    _write_lines(path, [json.dumps(data)])
+    with pytest.raises(RecordError, match="missing fields"):
+        read_records(path)
+
+
+def test_read_rejects_nan_literal(tmp_path: Path) -> None:
+    path = tmp_path / "r.jsonl"
+    _write_lines(path, [_good_line().replace('"cost_usd": 0.0', '"cost_usd": NaN')])
+    with pytest.raises(RecordError, match="NaN is not allowed"):
+        read_records(path)
+
+
+def test_read_rejects_duplicates_and_skips_blank_lines(tmp_path: Path) -> None:
+    path = tmp_path / "r.jsonl"
+    _write_lines(path, [_good_line("q1"), "", "   ", _good_line("q2")])
+    assert len(read_records(path)) == 2
+    _write_lines(path, [_good_line("q1"), _good_line("q1")])
+    with pytest.raises(RecordError, match="duplicate"):
+        read_records(path)
+
+
+def test_write_validates_everything_before_touching_the_file(tmp_path: Path) -> None:
+    bad = record("q2")
+    bad.tokens_in = -5  # mutated after construction
+    path = tmp_path / "r.jsonl"
+    with pytest.raises(RecordError):
+        write_records(path, [record("q1"), bad])
+    assert not path.exists()
+    with pytest.raises(TypeError):
+        write_records(path, [{"item_id": "q1"}])  # type: ignore[list-item]
+
+
+def test_metric_column_basic_and_numeric_fields() -> None:
+    records = [record("q1", latency_ms=100.0), record("q2", scores={"correct": False})]
+    column = metric_column(records, "correct")
+    assert column.values == {"q1": 1.0, "q2": 0.0}
+    assert column.binary
+    latency = metric_column(records, "latency_ms")
+    assert latency.values == {"q1": 100.0, "q2": 0.0}
+    assert not latency.binary
+
+
+def test_metric_column_error_policy() -> None:
+    records = [record("q1"), record("q2", scores={}, error="timeout")]
+    with pytest.raises(MissingScoreError, match="timeout"):
+        metric_column(records, "correct")
+    column = metric_column(records, "correct", on_error="exclude")
+    assert column.values == {"q1": 1.0}
+    assert column.excluded == ("q2",)
+    with pytest.raises(ValueError, match="on_error"):
+        metric_column(records, "correct", on_error="ignore")  # type: ignore[arg-type]
+
+
+def test_metric_column_missing_metric_without_error_is_a_contract_violation() -> None:
+    with pytest.raises(RecordError, match="has no metric 'grounded'"):
+        metric_column([record("q1")], "grounded")
+
+
+def test_metric_column_rejects_mixed_types_and_multiple_runs() -> None:
+    mixed = [record("q1"), record("q2", scores={"correct": 0.5})]
+    with pytest.raises(RecordError, match="mixes bool and numeric"):
+        metric_column(mixed, "correct")
+    two_runs = run("a", {"q1": True}) + run("b", {"q1": True})
+    with pytest.raises(RecordError, match="exactly one run"):
+        metric_column(two_runs, "correct")
+
+
+def test_record_is_a_plain_dataclass() -> None:
+    r = EvalRecord.from_dict(record().to_dict())
+    assert r == record()
+
+
+def test_errored_records_are_left_out_of_latency_and_cost() -> None:
+    """Review finding: an errored record's 0 ms and $0 used to count in the means."""
+    records = [
+        record("q1", latency_ms=900.0, cost_usd=0.002),
+        record("q2", latency_ms=1100.0, cost_usd=0.004),
+        record("q3", scores={}, error="timeout"),  # latency_ms and cost_usd default to 0
+    ]
+    for name in ("latency_ms", "cost_usd", "tokens_out"):
+        column = metric_column(records, name, on_error="exclude")
+        assert set(column.values) == {"q1", "q2"}
+        assert column.excluded == ("q3",)
+        with pytest.raises(MissingScoreError, match="timeout"):
+            metric_column(records, name)
+    summary = summarize_metric(records, "latency_ms", on_error="exclude")
+    assert summary.interval.estimate == pytest.approx(1000.0)
+    assert summary.excluded == ("q3",)
+
+
+def test_missing_score_message_names_the_python_option() -> None:
+    with pytest.raises(MissingScoreError, match="on_error='exclude'") as info:
+        metric_column([record("q1", scores={}, error="crash")], "correct")
+    assert "--on-error" not in str(info.value)
+    assert info.value.detail.endswith("because of an error: crash")
+
+
+def test_a_scoring_error_keeps_the_model_call_measurements() -> None:
+    """Re-review finding: a judge that failed to parse voided the answer's latency and cost."""
+    records = [
+        record("q1", scores={"correct": True, "pii_leak": False}, latency_ms=900.0, cost_usd=0.002),
+        record(
+            "q2",
+            scores={"pii_leak": False},
+            score_error="JudgeParseError: reply is not valid JSON",
+            latency_ms=1100.0,
+            cost_usd=0.004,
+        ),
+    ]
+    latency = metric_column(records, "latency_ms")  # no on_error needed
+    assert latency.values == {"q1": 900.0, "q2": 1100.0}
+    assert metric_column(records, "cost_usd").values["q2"] == 0.004
+    with pytest.raises(MissingScoreError, match="JudgeParseError"):
+        metric_column(records, "correct")
+    assert metric_column(records, "correct", on_error="exclude").excluded == ("q2",)
+    check = check_floor(records, Floor.parse("latency_ms:max=5000"))
+    assert (check.n_checked, check.unverified) == (2, ())
+
+
+def test_score_error_validation() -> None:
+    record("q1", scores={}, score_error="JudgeParseError: x")  # allowed without scores
+    with pytest.raises(RecordError, match="score_error"):
+        record("q1", score_error="")
+    with pytest.raises(RecordError, match="must carry an error or a score_error"):
+        record("q1", scores={})
