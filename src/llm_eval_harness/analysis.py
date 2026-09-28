@@ -259,7 +259,7 @@ def _paired_mde(
             return None
         return mde_paired_binary(comparison.n, discordant_rate)
     se = clustered_se(diffs)
-    return None if se == 0 else mde_from_se(se)
+    return None if se == 0 else mde_from_se(se, df=len(diffs) - 1)
 
 
 def _check_same_items(a: MetricColumn, b: MetricColumn) -> None:

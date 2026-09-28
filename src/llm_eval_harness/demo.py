@@ -145,6 +145,10 @@ def run_demo(data_dir: str | Path = DEFAULT_DATA_DIR) -> str:
         "",
         f"**CI gate** (`llm-eval gate`), exit code {gate.exit_code}:",
         "",
+        "The gate's numbers differ from the comparison table on purpose. The table "
+        "leaves out items that errored, while the gate counts an item that errored "
+        "only in the candidate as a failure, so errors can never hide a regression.",
+        "",
         "```text",
         format_gate(gate),
         "```",

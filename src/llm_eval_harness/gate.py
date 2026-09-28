@@ -249,7 +249,10 @@ def _regression_line(r: RegressionResult) -> str:
             f"{len(res.excluded_candidate)}, baseline {len(res.excluded_baseline)})"
         )
         if res.imputed:
-            line += f", {len(res.imputed)} candidate-only counted as failures"
+            n_imputed = len(res.imputed)
+            line += (
+                f", {n_imputed} candidate-only counted as failure{'s' if n_imputed != 1 else ''}"
+            )
         if res.excluded:
             line += f", {len(res.excluded)} excluded"
         if r.too_many_errors:

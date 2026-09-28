@@ -172,7 +172,7 @@ def test_exclude_mode_allows_a_few_errors_and_reports_them() -> None:
     # The error counts as one failure: a drop, but far from significant.
     assert result.regressions[0].status == "warn"
     assert result.exit_code == 0
-    assert "1 of 40 (candidate 1, baseline 0), 1 candidate-only counted as failures, limit 2" in (
+    assert "1 of 40 (candidate 1, baseline 0), 1 candidate-only counted as failure, limit 2" in (
         format_gate(result)
     )
 
