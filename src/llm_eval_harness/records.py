@@ -32,7 +32,17 @@ class RecordError(ValueError):
 
 
 class MissingScoreError(RecordError):
-    """A metric is absent because its record carries an error, and on_error is 'raise'."""
+    """A metric is absent because its record carries an error, and on_error is 'raise'.
+
+    `detail` names the item, run, metric and error without the hint, so the CLI
+    can point at its own flag instead.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail}. Pass on_error='exclude' to leave errored items out and report them."
+        )
+        self.detail = detail
 
 
 @dataclass(kw_only=True)
@@ -200,6 +210,11 @@ def metric_column(
     decides: 'raise' (the default) raises `MissingScoreError`, 'exclude' leaves
     the item out and lists it in `excluded` so callers can report it. A missing
     metric on a record without an error is always a contract violation.
+
+    The record fields (`latency_ms`, `cost_usd`, token counts) of an errored
+    record count as missing too: a crash reports 0 ms and a timeout reports the
+    timeout, so neither belongs in a mean. Sum `cost_usd` over every record for
+    total spend.
     """
     if on_error not in get_args(OnError):
         raise ValueError(f"on_error must be one of {get_args(OnError)}, got {on_error!r}")
@@ -217,8 +232,7 @@ def metric_column(
             if on_error == "raise":
                 raise MissingScoreError(
                     f"item {record.item_id!r} in run {run_id!r} has no {metric!r} "
-                    f"because of an error: {record.error}. To leave errored items out "
-                    "and report them, use on_error='exclude' (CLI: --on-error exclude)."
+                    f"because of an error: {record.error}"
                 )
             excluded.append(record.item_id)
             continue
@@ -240,13 +254,18 @@ def metric_column(
 
 
 def metric_value(record: EvalRecord, metric: str) -> float | bool | None:
-    """The metric's value, or None when it is missing because the record has an error."""
+    """The metric's value, or None when it is missing because the record has an error.
+
+    A score an errored record still carries (for example a PII check that ran
+    before the judge failed) is returned. Its record fields are not: see
+    `metric_column`.
+    """
     if metric in record.scores:
         return record.scores[metric]
-    if metric in NUMERIC_FIELDS:
-        return getattr(record, metric)
     if record.error is not None:
         return None
+    if metric in NUMERIC_FIELDS:
+        return getattr(record, metric)
     raise RecordError(
         f"item {record.item_id!r} in run {record.run_id!r} has no metric {metric!r} "
         f"(scores: {sorted(record.scores)})"

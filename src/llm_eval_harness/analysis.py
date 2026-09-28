@@ -11,6 +11,7 @@ import numpy as np
 from llm_eval_harness.records import (
     EvalRecord,
     MetricColumn,
+    MissingScoreError,
     OnError,
     RecordError,
     group_by_run,
@@ -62,7 +63,11 @@ class MetricSummary:
 
 @dataclass(frozen=True)
 class RunComparison:
-    """Candidate vs baseline on one metric, paired by item_id."""
+    """Candidate vs baseline on one metric, paired by item_id.
+
+    `excluded` lists items left out because they errored in either run, and
+    `excluded_baseline` / `excluded_candidate` say which run errored.
+    """
 
     metric: str
     baseline_run: str
@@ -71,6 +76,13 @@ class RunComparison:
     binary: bool
     mde: float | None
     excluded: tuple[str, ...]
+    excluded_baseline: tuple[str, ...] = ()
+    excluded_candidate: tuple[str, ...] = ()
+
+    @property
+    def n_items(self) -> int:
+        """Items in the runs, paired or excluded."""
+        return self.comparison.n + len(self.excluded)
 
 
 def summarize_metric(
@@ -161,6 +173,8 @@ def compare_runs(
         binary=a.binary,
         mde=_paired_mde(y - x, clusters, comparison),
         excluded=excluded,
+        excluded_baseline=tuple(sorted(a.excluded)),
+        excluded_candidate=tuple(sorted(b.excluded)),
     )
 
 
@@ -180,7 +194,13 @@ def pass_k_from_records(
     """
     successes: dict[str, list[bool]] = {}
     for run_records in group_by_run(records).values():
-        column = metric_column(run_records, metric, on_error="raise")
+        try:
+            column = metric_column(run_records, metric, on_error="raise")
+        except MissingScoreError as exc:
+            raise RecordError(
+                f"{exc.detail}. pass^k counts every trial, so an errored trial cannot be "
+                "left out (that would inflate pass^k). Rerun it, or record it as a failed score."
+            ) from exc
         if not column.binary:
             raise RecordError(f"pass^k needs a boolean metric, {metric!r} is numeric")
         for item_id, value in column.values.items():

@@ -28,13 +28,13 @@ Items dropped because the judge reply did not parse: 1 (q-disputes-3).
 | correct | 82.1% | 61.2% to 93.0% | 39 |
 | grounded | 59.0% | 40.4% to 75.3% | 39 |
 | pii_leak | 0.0% | 0.0% to 12.3% | 40 |
-| latency_ms | 1065 | 899.3 to 1231 | 40 |
+| latency_ms | 1077 | 925.5 to 1229 | 39 |
 
-MDE against another run of the same size (unpaired, 80% power, alpha 0.05): correct 27.9 pts, grounded 31.7 pts, pii_leak n/a, latency_ms 277.7. A paired comparison on the same items usually detects less.
+MDE against another run of the same size (unpaired, 80% power, alpha 0.05): correct 27.9 pts, grounded 31.7 pts, pii_leak n/a, latency_ms 254.4. A paired comparison on the same items usually detects less.
 
-CI method: Wilson with Korn-Graubard effective n (8 clusters) for correct, grounded, pii_leak. t with CR1 clustered SE (8 clusters, 7 df) for latency_ms. Excluded errored items: 1 from correct, 1 from grounded.
+CI method: Wilson with Korn-Graubard effective n (8 clusters) for correct, grounded, pii_leak. t with CR1 clustered SE (8 clusters, 7 df) for latency_ms. Excluded errored items: 1 from correct, 1 from grounded, 1 from latency_ms.
 
-Simulated cost of the candidate run at gpt-6-luna list prices: $0.0087 for 40 answers.
+Simulated cost of the candidate run at gpt-6-luna list prices: $0.0087 for 40 answers, including $0.0002 on 1 errored item, which the latency and cost means leave out.
 
 **Candidate vs baseline**, paired by item, clustered by article.
 
@@ -43,7 +43,7 @@ Simulated cost of the candidate run at gpt-6-luna list prices: $0.0087 for 40 an
 | correct | 64.1% | 82.1% | +17.9 pts | +0.9 pts to +35.0 pts | 0.042 | 23.6 pts | 39 |
 | grounded | 74.4% | 59.0% | -15.4 pts | -46.2 pts to +15.5 pts | 0.277 | 42.6 pts | 39 |
 
-Method: CI from t with CR1 clustered SE (8 clusters, 7 df), p from the clustered t-test, for correct, grounded.
+Method: CI from t with CR1 clustered SE (8 clusters, 7 df), p from the clustered t-test, for correct, grounded. Excluded errored items: 1 of 40 from correct (candidate 1, baseline 0), 1 of 40 from grounded (candidate 1, baseline 0).
 
 **Baseline pass rate corrected for judge error** (Rogan-Gladen, CI includes calibration uncertainty).
 
@@ -60,9 +60,9 @@ llm-eval gate: PASS
 Hard floors (any single violation blocks)
   [PASS] pii_leak max=0: 0 violations in 40 records
 
-Regressions (candidate - baseline, paired by item_id, 95% bootstrap CI)
-  [PASS] correct (higher is better): +0.179 [+0.009, +0.350] n=39. Errored items excluded: 1
-  [WARN] grounded (higher is better): -0.154 [-0.462, +0.155] n=39. Inconclusive, the MDE at this n is about 0.426. Errored items excluded: 1
+Regressions (candidate - baseline, paired by item_id). A drop blocks when significant at the 5% level.
+  [PASS] correct (higher is better): +0.179, n=39. 95% CI [+0.009, +0.350], clustered t-test p=0.042 (8 clusters). Errored items: 1 of 40 excluded (candidate 1, baseline 0), limit 2.
+  [WARN] grounded (higher is better): -0.154, n=39. 95% CI [-0.462, +0.155], clustered t-test p=0.277 (8 clusters). Inconclusive, the MDE at this n is about 0.426. Errored items: 1 of 40 excluded (candidate 1, baseline 0), limit 2.
 ```
 <!-- demo:end -->
 

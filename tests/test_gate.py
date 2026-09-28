@@ -128,3 +128,93 @@ def test_cli_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     )
     assert main([*args, "--candidate", str(tmp_path / "missing.jsonl"), "--metric", "correct"]) == 2
     assert "error" in capsys.readouterr().err
+
+
+# Review findings: the gate must fail closed, and its decision must match what it prints.
+
+
+def test_floor_blocks_when_no_record_was_checked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = check_floor([], Floor.parse("pii_leak:max=0"))
+    assert result.n_checked == 0
+    assert not result.passed
+    write_records(tmp_path / "base.jsonl", [record("q1", "base", scores={"pii_leak": False})])
+    write_records(tmp_path / "empty.jsonl", [])
+    args = ["gate", "--baseline", str(tmp_path / "base.jsonl")]
+    args += ["--candidate", str(tmp_path / "empty.jsonl"), "--floor", "pii_leak:max=0"]
+    assert main(args) == 1
+    assert "no records were checked" in capsys.readouterr().out
+
+
+def _half_errored() -> tuple[list, list]:
+    base = [record(f"q{i:02d}", "base", scores={"correct": True}) for i in range(40)]
+    cand = [record(f"q{i:02d}", "cand", scores={"correct": True}) for i in range(20)]
+    cand += [record(f"q{i:02d}", "cand", scores={}, error="timeout") for i in range(20, 40)]
+    return base, cand
+
+
+def test_exclude_mode_blocks_when_too_many_items_errored() -> None:
+    base, cand = _half_errored()
+    result = run_gate(base, cand, metrics=[GateMetric("correct")], on_error="exclude", n_boot=200)
+    (reg,) = result.regressions
+    assert reg.status == "block"
+    assert result.exit_code == 1
+    text = format_gate(result)
+    assert "20 of 40 excluded (candidate 20, baseline 0), over the limit of 2" in text
+
+
+def test_exclude_mode_allows_a_few_errors_and_reports_them() -> None:
+    base = [record(f"q{i:02d}", "base", scores={"correct": True}) for i in range(40)]
+    cand = [record(f"q{i:02d}", "cand", scores={"correct": True}) for i in range(39)]
+    cand.append(record("q39", "cand", scores={}, error="timeout"))
+    result = run_gate(base, cand, metrics=[GateMetric("correct")], on_error="exclude", n_boot=200)
+    assert result.regressions[0].status == "pass"
+    assert "1 of 40 excluded (candidate 1, baseline 0), limit 2" in format_gate(result)
+
+
+def test_four_of_forty_regressions_warn_with_the_mcnemar_p_value() -> None:
+    """The review case: [BLOCK] was printed next to McNemar p = 0.125."""
+    base = run("base", {f"q{i:02d}": True for i in range(40)})
+    cand = run("cand", {f"q{i:02d}": i >= 4 for i in range(40)})
+    result = run_gate(base, cand, metrics=[GateMetric("correct")], n_boot=2000)
+    (reg,) = result.regressions
+    assert reg.status == "warn"
+    line = format_gate(result).splitlines()[-1]
+    assert line.startswith("  [WARN] correct")
+    assert "4 baseline-only, 0 candidate-only, exact McNemar p=0.125" in line
+
+
+@pytest.mark.parametrize("clustered", [False, True])
+def test_binary_block_decision_always_matches_the_printed_p_value(clustered: bool) -> None:
+    rng = np.random.default_rng(12)
+    labels = {f"q{i:02d}": f"c{i % 8}" for i in range(40)} if clustered else None
+    for _ in range(60):
+        u = rng.uniform(size=40)
+        p_base, p_cand = rng.uniform(0.5, 0.9), rng.uniform(0.4, 0.9)
+        base = run(
+            "base",
+            {k: bool(x < p_base) for k, x in zip(labels or ITEMS, u, strict=True)},
+            clusters=labels,
+        )
+        cand = run(
+            "cand",
+            {k: bool(x < p_cand) for k, x in zip(labels or ITEMS, u, strict=True)},
+            clusters=labels,
+        )
+        if all(r.scores == c.scores for r, c in zip(base, cand, strict=True)):
+            continue
+        result = run_gate(
+            base, cand, metrics=[GateMetric("correct")], use_clusters=clustered, n_boot=500
+        )
+        (reg,) = result.regressions
+        c = reg.result.comparison
+        assert c.pvalue is not None
+        worse_and_significant = c.diff < 0 and c.pvalue < 0.05
+        assert (reg.status == "block") == worse_and_significant
+        assert f"p={c.pvalue:.3f}" in format_gate(result)
+        if clustered:  # the CI and the test are duals
+            assert (c.high < 0) == worse_and_significant
+
+
+ITEMS = [f"q{i:02d}" for i in range(40)]

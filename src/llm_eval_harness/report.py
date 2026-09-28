@@ -83,17 +83,26 @@ def comparison_table(results: Sequence[RunComparison]) -> str:
 
 
 def comparison_methods_line(results: Sequence[RunComparison]) -> str:
-    """Which CI method and test each comparison used."""
+    """Which CI method and test each comparison used, plus any items excluded for errors."""
     by_method: dict[str, list[str]] = {}
     for r in results:
         c = r.comparison
         test = "no p-value" if c.test is None else f"p from the {c.test}"
         by_method.setdefault(f"CI from {c.method}, {test}", []).append(r.metric)
-    return (
+    line = (
         "Method: "
         + ". ".join(f"{method}, for {', '.join(metrics)}" for method, metrics in by_method.items())
         + "."
     )
+    excluded = [
+        f"{len(r.excluded)} of {r.n_items} from {r.metric} (candidate "
+        f"{len(r.excluded_candidate)}, baseline {len(r.excluded_baseline)})"
+        for r in results
+        if r.excluded
+    ]
+    if excluded:
+        line += f" Excluded errored items: {', '.join(excluded)}."
+    return line
 
 
 def agreement_table(agreements: Sequence[tuple[str, JudgeAgreement]]) -> str:

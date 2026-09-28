@@ -2,21 +2,30 @@
 
 Hard floors (`pii_leak:max=0`) are checked on every candidate record and fail
 on a single violation. They fail closed: a record that errored before the
-floor metric was computed counts as unverified, which also blocks.
+floor metric was computed counts as unverified, which blocks, and so does a
+floor that checked no record at all (an empty candidate run).
 
-Metric regressions compare candidate against baseline, paired by item_id. For
-a higher-is-better metric with diff = candidate - baseline:
+Metric regressions compare candidate against baseline, paired by item_id,
+with one rule: a drop blocks when it is significant at the 5% level, and the
+line printed for it shows the statistic that rule used.
 
-- block: the upper bound of the 95% CI of diff is below 0 (the drop is real)
-- warn:  diff < 0 but the CI reaches 0 (inconclusive, maybe a drop)
-- pass:  otherwise
+- pass/fail metric, no clustering: the exact McNemar test (p < 0.05)
+- any metric with --cluster: the clustered t-test, whose 95% CI excludes 0
+  exactly when p < 0.05
+- numeric metric, no clustering: the 95% paired bootstrap CI excludes 0
 
-Lower-is-better metrics (`hallucination:lower`) use the mirrored rule. Only
-blocks change the exit code: 0 pass, 1 block.
+A drop that is not significant warns (with the MDE) and does not block. For
+lower-is-better metrics (`hallucination:lower`) a rise is the drop.
+
+With on_error='exclude', items that errored in either run are left out of the
+comparison, and the gate blocks if more than `max_excluded` of the items (5% by
+default) had to be left out, since the comparison then no longer covers the
+run. Only blocks change the exit code: 0 pass, 1 block.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -24,8 +33,11 @@ from typing import Literal
 
 from llm_eval_harness.analysis import RunComparison, compare_runs
 from llm_eval_harness.records import EvalRecord, OnError, metric_value
+from llm_eval_harness.stats import PairedComparison
 
 Status = Literal["pass", "warn", "block"]
+ALPHA = 0.05
+DEFAULT_MAX_EXCLUDED = 0.05
 _FLOOR = re.compile(r"^([A-Za-z0-9_.-]+):(max|min)=([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)$")
 _METRIC = re.compile(r"^([A-Za-z0-9_.-]+)(?::(higher|lower))?$")
 
@@ -74,14 +86,21 @@ class FloorResult:
 
     @property
     def passed(self) -> bool:
-        return not self.violations and not self.unverified
+        return self.n_checked > 0 and not self.violations and not self.unverified
 
 
 @dataclass(frozen=True)
 class RegressionResult:
+    """`status` combines the significance rule and the limit on excluded items."""
+
     metric: GateMetric
     result: RunComparison
     status: Status
+    excluded_limit: int
+
+    @property
+    def too_many_excluded(self) -> bool:
+        return len(self.result.excluded) > self.excluded_limit
 
 
 @dataclass(frozen=True)
@@ -119,14 +138,17 @@ def check_floor(candidate: Sequence[EvalRecord], floor: Floor) -> FloorResult:
 
 
 def regression_status(result: RunComparison, higher_is_better: bool) -> Status:
+    """Block a significant drop, warn on any other drop, pass otherwise.
+
+    Significance comes from the comparison's p-value when it has one (exact
+    McNemar, or the clustered t-test), else from the bootstrap CI excluding 0.
+    """
     c = result.comparison
     # Express everything as "improvement", so positive is always good.
-    gain, gain_high = (c.diff, c.high) if higher_is_better else (-c.diff, -c.low)
-    if gain_high < 0:
-        return "block"
-    if gain < 0:
-        return "warn"
-    return "pass"
+    gain = c.diff if higher_is_better else -c.diff
+    if gain >= 0:
+        return "pass"
+    return "block" if _significant(c, higher_is_better) else "warn"
 
 
 def run_gate(
@@ -137,11 +159,14 @@ def run_gate(
     *,
     use_clusters: bool = False,
     on_error: OnError = "raise",
+    max_excluded: float = DEFAULT_MAX_EXCLUDED,
     n_boot: int = 10_000,
     seed: int = 0,
 ) -> GateResult:
     if not floors and not metrics:
         raise ValueError("the gate needs at least one floor or metric")
+    if not 0.0 <= max_excluded < 1.0:
+        raise ValueError(f"max_excluded must be in [0, 1), got {max_excluded}")
     floor_results = tuple(check_floor(candidate, floor) for floor in floors)
     regressions = []
     for metric in metrics:
@@ -152,12 +177,14 @@ def run_gate(
             use_clusters=use_clusters,
             on_error=on_error,
             n_boot=n_boot,
-            confidence=0.95,
+            confidence=1.0 - ALPHA,
             seed=seed,
         )
-        regressions.append(
-            RegressionResult(metric, result, regression_status(result, metric.higher_is_better))
-        )
+        limit = math.floor(max_excluded * result.n_items + 1e-9)
+        status = regression_status(result, metric.higher_is_better)
+        if len(result.excluded) > limit:
+            status = "block"
+        regressions.append(RegressionResult(metric, result, status, limit))
     return GateResult(floors=floor_results, regressions=tuple(regressions))
 
 
@@ -174,26 +201,64 @@ def format_gate(result: GateResult) -> str:
                 detail += f" {_preview(f.violations)}"
             if f.unverified:
                 detail += f", {len(f.unverified)} unverified (errored) {_preview(f.unverified)}"
+            if f.n_checked == 0:
+                detail += ". Blocked because no records were checked"
             lines.append(f"  [{tag}] {f.floor}: {detail}")
     if result.regressions:
         lines.append("")
-        lines.append("Regressions (candidate - baseline, paired by item_id, 95% bootstrap CI)")
+        lines.append(
+            "Regressions (candidate - baseline, paired by item_id). "
+            f"A drop blocks when significant at the {ALPHA:.0%} level."
+        )
         for r in result.regressions:
-            c = r.result.comparison
-            direction = "higher is better" if r.metric.higher_is_better else "lower is better"
-            line = (
-                f"  [{r.status.upper()}] {r.metric.name} ({direction}): {c.diff:+.3f} "
-                f"[{c.low:+.3f}, {c.high:+.3f}] n={c.n}"
-            )
-            if c.mcnemar is not None:
-                line += f" McNemar p={c.mcnemar.pvalue:.3f}"
-            if r.status == "warn":
-                mde = "n/a" if r.result.mde is None else f"{r.result.mde:.3f}"
-                line += f". Inconclusive, the MDE at this n is about {mde}"
-            if r.result.excluded:
-                line += f". Errored items excluded: {len(r.result.excluded)}"
-            lines.append(line)
+            lines.append(_regression_line(r))
     return "\n".join(lines)
+
+
+def _regression_line(r: RegressionResult) -> str:
+    c = r.result.comparison
+    direction = "higher is better" if r.metric.higher_is_better else "lower is better"
+    line = f"  [{r.status.upper()}] {r.metric.name} ({direction}): {c.diff:+.3f}, n={c.n}. "
+    if c.test == "exact McNemar test" and c.mcnemar is not None:
+        m = c.mcnemar
+        line += (
+            f"Discordant pairs {m.a_only} baseline-only, {m.b_only} candidate-only, "
+            f"exact McNemar p={m.pvalue:.3f}"
+        )
+    elif c.test is not None and c.pvalue is not None:
+        line += (
+            f"95% CI [{c.low:+.3f}, {c.high:+.3f}], {c.test} p={c.pvalue:.3f} "
+            f"({c.n_clusters} clusters)"
+        )
+    else:
+        line += f"95% bootstrap CI [{c.low:+.3f}, {c.high:+.3f}]"
+    gain = c.diff if r.metric.higher_is_better else -c.diff
+    if gain < 0 and not _significant(c, r.metric.higher_is_better):
+        if r.result.mde is not None:
+            line += f". Inconclusive, the MDE at this n is about {r.result.mde:.3f}"
+        else:  # only the exact McNemar MDE is None for a drop: too few discordant pairs
+            line += ". Inconclusive, too few discordant pairs for 80% power at any effect size"
+    if r.result.excluded:
+        excluded = (
+            f"{len(r.result.excluded)} of {r.result.n_items} excluded "
+            f"(candidate {len(r.result.excluded_candidate)}, "
+            f"baseline {len(r.result.excluded_baseline)})"
+        )
+        if r.too_many_excluded:
+            line += (
+                f". Errored items: {excluded}, over the limit of {r.excluded_limit}, "
+                "so the comparison no longer covers the run"
+            )
+        else:
+            line += f". Errored items: {excluded}, limit {r.excluded_limit}"
+    return line + "."
+
+
+def _significant(c: PairedComparison, higher_is_better: bool) -> bool:
+    """Whether the drop direction is significant at ALPHA, by the comparison's own test."""
+    if c.pvalue is not None:
+        return c.pvalue < ALPHA
+    return c.high < 0 if higher_is_better else c.low > 0
 
 
 def _preview(ids: Sequence[str], limit: int = 5) -> str:

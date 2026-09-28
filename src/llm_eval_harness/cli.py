@@ -19,7 +19,13 @@ from llm_eval_harness.calibration import (
     split_dev_test,
 )
 from llm_eval_harness.demo import DEFAULT_DATA_DIR, SECTION, run_demo
-from llm_eval_harness.gate import Floor, GateMetric, format_gate, run_gate
+from llm_eval_harness.gate import (
+    DEFAULT_MAX_EXCLUDED,
+    Floor,
+    GateMetric,
+    format_gate,
+    run_gate,
+)
 from llm_eval_harness.judge import load_checklist
 from llm_eval_harness.labeling import (
     disagreeing_items,
@@ -28,7 +34,13 @@ from llm_eval_harness.labeling import (
     read_labels,
     run_session,
 )
-from llm_eval_harness.records import EvalRecord, metric_column, read_records, single_run_id
+from llm_eval_harness.records import (
+    EvalRecord,
+    MissingScoreError,
+    metric_column,
+    read_records,
+    single_run_id,
+)
 from llm_eval_harness.report import (
     agreement_table,
     comparison_methods_line,
@@ -47,6 +59,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
+    except MissingScoreError as exc:
+        hint = ""
+        if getattr(args, "on_error", None) is not None:
+            hint = " Rerun with --on-error exclude to leave errored items out and report them."
+        print(f"llm-eval {args.command}: error: {exc.detail}.{hint}", file=sys.stderr)
+        return 2
     except (ValueError, OSError) as exc:
         # Contract, label, calibration and file errors end the command with a message.
         print(f"llm-eval {args.command}: error: {exc}", file=sys.stderr)
@@ -117,8 +135,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--metric", action="append", default=[], help="regression metric, NAME or NAME:lower"
     )
-    p.add_argument("--cluster", action="store_true", help="resample clusters in the bootstrap")
+    p.add_argument("--cluster", action="store_true", help="clustered t-test using record.cluster")
     p.add_argument("--on-error", choices=["raise", "exclude"], default="raise")
+    p.add_argument(
+        "--max-excluded",
+        type=float,
+        default=DEFAULT_MAX_EXCLUDED,
+        metavar="FRACTION",
+        help="with --on-error exclude, block if more than this share of items errored "
+        f"(default {DEFAULT_MAX_EXCLUDED})",
+    )
     _boot_args(p)
     p.set_defaults(func=cmd_gate)
 
@@ -134,6 +160,15 @@ def cmd_stats(args: argparse.Namespace) -> int:
     records = read_records(args.results)
     metrics = args.metric or _score_names(records)
     if args.k is not None:
+        if args.cluster:
+            raise ValueError(
+                "--cluster is not supported with --k: the pass^k interval resamples tasks"
+            )
+        if args.on_error != "raise":
+            raise ValueError(
+                "--on-error exclude does not apply to --k: pass^k counts every trial, and "
+                "leaving errored trials out would inflate pass^k"
+            )
         for metric in metrics:
             result = pass_k_from_records(
                 records, metric, args.k, n_boot=args.n_boot, seed=args.seed
@@ -271,6 +306,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
         metrics=[GateMetric.parse(spec) for spec in args.metric],
         use_clusters=args.cluster,
         on_error=args.on_error,
+        max_excluded=args.max_excluded,
         n_boot=args.n_boot,
         seed=args.seed,
     )

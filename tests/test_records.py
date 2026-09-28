@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from helpers import record, run
 
+from llm_eval_harness.analysis import summarize_metric
 from llm_eval_harness.records import (
     EvalRecord,
     MissingScoreError,
@@ -157,3 +158,28 @@ def test_metric_column_rejects_mixed_types_and_multiple_runs() -> None:
 def test_record_is_a_plain_dataclass() -> None:
     r = EvalRecord.from_dict(record().to_dict())
     assert r == record()
+
+
+def test_errored_records_are_left_out_of_latency_and_cost() -> None:
+    """Review finding: an errored record's 0 ms and $0 used to count in the means."""
+    records = [
+        record("q1", latency_ms=900.0, cost_usd=0.002),
+        record("q2", latency_ms=1100.0, cost_usd=0.004),
+        record("q3", scores={}, error="timeout"),  # latency_ms and cost_usd default to 0
+    ]
+    for name in ("latency_ms", "cost_usd", "tokens_out"):
+        column = metric_column(records, name, on_error="exclude")
+        assert set(column.values) == {"q1", "q2"}
+        assert column.excluded == ("q3",)
+        with pytest.raises(MissingScoreError, match="timeout"):
+            metric_column(records, name)
+    summary = summarize_metric(records, "latency_ms", on_error="exclude")
+    assert summary.interval.estimate == pytest.approx(1000.0)
+    assert summary.excluded == ("q3",)
+
+
+def test_missing_score_message_names_the_python_option() -> None:
+    with pytest.raises(MissingScoreError, match="on_error='exclude'") as info:
+        metric_column([record("q1", scores={}, error="crash")], "correct")
+    assert "--on-error" not in str(info.value)
+    assert info.value.detail.endswith("because of an error: crash")

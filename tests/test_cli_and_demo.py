@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from helpers import run
+from helpers import record, run
 
 from llm_eval_harness.cli import main
 from llm_eval_harness.demo import SECTION, run_demo
@@ -102,3 +102,36 @@ def test_synthetic_data_regenerates_identically(
     runpy.run_path(str(script), run_name="__main__")
     for committed in DATA.iterdir():
         assert (tmp_path / committed.name).read_bytes() == committed.read_bytes(), committed.name
+
+
+def test_cli_hint_names_an_option_the_command_has(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    records = [*run("r", {"q1": True, "q2": False}), record("q3", "r", scores={}, error="crash")]
+    write_records(tmp_path / "r.jsonl", records)
+    assert main(["stats", str(tmp_path / "r.jsonl")]) == 2
+    err = capsys.readouterr().err
+    assert "because of an error: crash" in err
+    assert "Rerun with --on-error exclude" in err
+    assert "on_error='exclude'" not in err
+    assert main(["stats", str(tmp_path / "r.jsonl"), "--on-error", "exclude"]) == 0
+    assert "Excluded errored items: 1 from correct" in capsys.readouterr().out
+
+
+def test_stats_k_refuses_options_it_cannot_honor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    trials = run("t0", {"a": True, "b": False}, clusters={"a": "x", "b": "y"})
+    trials += run("t1", {"a": True, "b": True}, clusters={"a": "x", "b": "y"})
+    write_records(tmp_path / "trials.jsonl", trials)
+    path = str(tmp_path / "trials.jsonl")
+    assert main(["stats", path, "--k", "2", "--cluster"]) == 2
+    assert "--cluster is not supported with --k" in capsys.readouterr().err
+    assert main(["stats", path, "--k", "2", "--on-error", "exclude"]) == 2
+    assert "would inflate pass^k" in capsys.readouterr().err
+    errored = [*trials, record("a", "t2", scores={}, error="crash")]
+    write_records(tmp_path / "errored.jsonl", errored)
+    assert main(["stats", str(tmp_path / "errored.jsonl"), "--k", "2"]) == 2
+    err = capsys.readouterr().err
+    assert "pass^k counts every trial" in err
+    assert "--on-error" not in err
