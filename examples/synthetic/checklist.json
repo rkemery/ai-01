@@ -1,0 +1,13 @@
+{
+  "name": "synthetic-support-answer-v1",
+  "items": [
+    {
+      "id": "correct",
+      "question": "Does the answer state the same key facts as the reference, with no contradiction?"
+    },
+    {
+      "id": "grounded",
+      "question": "Is every claim in the answer supported by the reference?"
+    }
+  ]
+}
