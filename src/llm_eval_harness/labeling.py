@@ -41,6 +41,13 @@ from llm_eval_harness.records import EvalRecord, metric_column
 LABEL_SCHEMA_VERSION = 2
 Sampling = Literal["uniform", "disagreement"]
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_MIGRATE = (
+    f"This version reads schema_version {LABEL_SCHEMA_VERSION} only. Version 1 labels lack "
+    "items_sha256 and n_target, which record the sample each label belongs to. To migrate "
+    'a version 1 file, add to every line: "schema_version": 2, "items_sha256": '
+    "llm_eval_harness.labeling.items_fingerprint(ids) over the item ids the labeling order "
+    'was drawn from, and "n_target": the --n used (or the number of those items).'
+)
 
 
 class LabelError(ValueError):
@@ -115,6 +122,9 @@ def read_labels(path: str | Path) -> list[LabelRecord]:
         where = f"{path}:{lineno}"
         if not isinstance(data, dict) or set(data) - known:
             raise LabelError(f"{where}: not a label record")
+        version = data.get("schema_version", 1)
+        if version != LABEL_SCHEMA_VERSION:
+            raise LabelError(f"{where}: label schema_version {version!r}. {_MIGRATE}")
         try:
             record = LabelRecord(**data)
         except TypeError as exc:

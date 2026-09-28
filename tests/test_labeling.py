@@ -292,3 +292,21 @@ def test_limit_must_be_positive(tmp_path: Path, capsys: pytest.CaptureFixture[st
         )
     assert info.value.code == 2
     assert "--n" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("with_version", [True, False])
+def test_v1_label_files_get_a_migration_message(tmp_path: Path, with_version: bool) -> None:
+    """Re-review finding: a v1 file failed with a raw missing-argument TypeError."""
+    row = {"item_id": "q00", "labels": {"ok": True}, "labeler": "a", "sampling": "uniform"}
+    row |= {"seed": 0, "created_at": "2026-01-01T00:00:00+00:00"}
+    if with_version:
+        row["schema_version"] = 1
+    path = tmp_path / "v1.jsonl"
+    path.write_text(json.dumps(row) + "\n")
+    with pytest.raises(LabelError) as info:
+        read_labels(path)
+    message = str(info.value)
+    assert "v1.jsonl:1: label schema_version 1" in message
+    assert "items_fingerprint" in message
+    assert "n_target" in message
+    assert "keyword-only arguments" not in message
