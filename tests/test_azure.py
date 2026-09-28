@@ -232,3 +232,16 @@ def test_real_sdk_client_is_configured_without_network(monkeypatch: pytest.Monke
     )
     assert client.max_retries == 0
     assert str(client.base_url) == BASE_URL
+
+
+def test_gpt6_accepts_its_default_temperature() -> None:
+    """Review finding: temperature=1.0, the default, was refused too."""
+    kwargs = azure.request_kwargs(ModelRequest(model="gpt-6-luna", input="x", temperature=1.0))
+    assert kwargs["temperature"] == 1.0
+    with pytest.raises(ValueError, match="default temperature"):
+        azure.request_kwargs(ModelRequest(model="gpt-6-luna", input="x", temperature=0.7))
+
+
+def test_trial_is_not_sent_to_the_model() -> None:
+    kwargs = azure.request_kwargs(ModelRequest(model="gpt-6-luna", input="x", trial=3))
+    assert "trial" not in kwargs

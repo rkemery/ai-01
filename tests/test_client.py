@@ -20,6 +20,8 @@ from llm_eval_harness.client import (
     RetryingClient,
     UnknownModelPrice,
     cost_usd,
+    input_token_bound,
+    max_cost_usd,
 )
 
 
@@ -151,16 +153,18 @@ def test_plan_prices() -> None:
     assert DEFAULT_PRICES["Llama-3.3-70B-Instruct"] == Price(0.71, 0.71)
 
 
-def test_dollar_cap_blocks_once_reached() -> None:
-    # Each call: 1M input tokens of gpt-6-sol = $2.00.
-    inner = FakeClient(lambda r: resp(model=r.model, input_tokens=1_000_000, output_tokens=0))
+def test_dollar_cap_refuses_the_call_that_could_pass_the_cap() -> None:
+    # Each call bills 100k output tokens of gpt-6-sol ($1.00) and 10 input tokens.
+    inner = FakeClient(lambda r: resp(model=r.model, input_tokens=10, output_tokens=100_000))
     cap = DollarCap(inner, cap_usd=5.0)
-    for _ in range(3):
-        cap.complete(req(model="gpt-6-sol"))
-    assert cap.spent_usd == pytest.approx(6.0)  # the third call pushed past the cap
-    with pytest.raises(BudgetExceeded, match=r"\$6.0000 of the \$5.00 cap"):
-        cap.complete(req(model="gpt-6-sol"))
-    assert len(inner.calls) == 3
+    request = req(model="gpt-6-sol", max_output_tokens=100_000)
+    for _ in range(4):
+        cap.complete(request)
+    assert cap.spent_usd == pytest.approx(4 * (10 * 2.0 + 100_000 * 10.0) / 1e6)
+    # A fifth call could cost a little over $1.00, which would pass $5.00.
+    with pytest.raises(BudgetExceeded, match=r"\$4\.0001 of the \$5\.00 cap"):
+        cap.complete(request)
+    assert len(inner.calls) == 4
 
 
 def test_dollar_cap_refuses_unknown_models_before_calling() -> None:
@@ -173,8 +177,8 @@ def test_dollar_cap_refuses_unknown_models_before_calling() -> None:
 def test_dollar_cap_does_not_charge_cache_hits(tmp_path: Path) -> None:
     inner = FakeClient(lambda r: resp(input_tokens=1_000_000, output_tokens=0))
     cap = DollarCap(CachedClient(inner, tmp_path), cap_usd=1.0)
-    cap.complete(req())
-    cap.complete(req())
+    cap.complete(req(max_output_tokens=10))
+    cap.complete(req(max_output_tokens=10))
     assert cap.spent_usd == pytest.approx(0.10)
     assert cap.calls == 2
 
@@ -217,3 +221,79 @@ def test_retrying_client_gives_up_and_passes_other_errors() -> None:
     with pytest.raises(KeyError):
         client.complete(req())
     assert len(sleeps) == 2
+
+
+# Review findings: trials, cache key normalization, incomplete replies, the cap's overshoot.
+
+
+def test_trials_of_one_request_get_their_own_cache_entries(tmp_path: Path) -> None:
+    """Without a trial index, 3 trials returned one cached reply 3 times, so pass^k = pass^1."""
+    replies = iter(["answer A", "answer B", "answer C"])
+    cached = CachedClient(FakeClient(lambda r: next(replies)), tmp_path)
+    first = [cached.complete(req("same task", trial=t)).text for t in range(3)]
+    assert first == ["answer A", "answer B", "answer C"]
+    assert (cached.hits, cached.misses) == (0, 3)
+    replay = CachedClient(None, tmp_path, replay_only=True)
+    assert [replay.complete(req("same task", trial=t)).text for t in range(3)] == first
+
+
+def test_trial_must_be_a_non_negative_int() -> None:
+    for bad in (-1, 1.0, True):
+        with pytest.raises(ValueError, match="trial"):
+            req(trial=bad)
+
+
+def test_cache_key_treats_equal_numbers_alike() -> None:
+    assert req(temperature=0).cache_key() == req(temperature=0.0).cache_key()
+    assert req(extra={"top_p": 1}).cache_key() == req(extra={"top_p": 1.0}).cache_key()
+    assert req(temperature=0.5).cache_key() != req(temperature=0).cache_key()
+
+
+def test_incomplete_replies_are_not_cached(tmp_path: Path) -> None:
+    inner = FakeClient([resp(finish_reason="max_output_tokens"), resp(text="full")])
+    cached = CachedClient(inner, tmp_path)
+    assert cached.complete(req()).finish_reason == "max_output_tokens"
+    assert not cached.path_for(req()).exists()
+    assert cached.not_stored == 1
+    assert cached.complete(req()).text == "full"
+    assert cached.complete(req()).from_cache
+    assert len(inner.calls) == 2
+
+
+def test_dollar_cap_refuses_a_call_that_could_pass_the_cap() -> None:
+    """Review case: a $1 cap let one gpt-6-sol call spend $20."""
+    inner = FakeClient([resp(model="gpt-6-sol", input_tokens=10, output_tokens=2_000_000)])
+    cap = DollarCap(inner, cap_usd=1.0)
+    with pytest.raises(BudgetExceeded, match="could cost up to"):
+        cap.complete(req(model="gpt-6-sol", max_output_tokens=2_000_000))
+    assert inner.calls == []
+    assert cap.spent_usd == 0.0
+
+
+def test_dollar_cap_needs_max_output_tokens() -> None:
+    inner = FakeClient(["x"])
+    with pytest.raises(ValueError, match="max_output_tokens"):
+        DollarCap(inner, cap_usd=1.0).complete(req())
+    assert inner.calls == []
+
+
+def test_dollar_cap_never_passes_the_cap_even_in_the_worst_case() -> None:
+    """Every call bills its worst case: one input token per byte plus the allowance, and
+    max_output_tokens of output. Spend still stays under the cap."""
+    request = req("hello world " * 50, model="gpt-6-sol", max_output_tokens=4000)
+    worst = max_cost_usd(DEFAULT_PRICES["gpt-6-sol"], request)
+    inner = FakeClient(
+        lambda r: resp(
+            model=r.model, input_tokens=input_token_bound(r), output_tokens=r.max_output_tokens
+        )
+    )
+    cap = DollarCap(inner, cap_usd=1.0)
+    calls = int(1.0 // worst)  # as many worst-case calls as fit
+    for _ in range(calls):
+        cap.complete(request)
+    with pytest.raises(BudgetExceeded):
+        cap.complete(request)
+    assert len(inner.calls) == calls
+    assert cap.spent_usd <= 1.0
+    assert cap.spent_usd > 1.0 - worst  # it stops only when one more call might not fit
+    assert cap.spent_usd == pytest.approx(len(inner.calls) * worst)

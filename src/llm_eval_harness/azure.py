@@ -32,8 +32,8 @@ from llm_eval_harness.client import ModelRequest, ModelResponse
 
 DEFAULT_TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
 
-# gpt-6 deployments reject any temperature other than the default.
-_NO_TEMPERATURE_PREFIXES = ("gpt-6",)
+# gpt-6 deployments reject any temperature other than the default, 1.0.
+_DEFAULT_TEMPERATURE_ONLY = ("gpt-6",)
 
 
 def _require(module: str) -> ModuleType:
@@ -89,10 +89,10 @@ def request_kwargs(request: ModelRequest) -> dict[str, Any]:
     if request.reasoning_effort is not None:
         kwargs["reasoning"] = {"effort": request.reasoning_effort}
     if request.temperature is not None:
-        if request.model.startswith(_NO_TEMPERATURE_PREFIXES):
+        if request.model.startswith(_DEFAULT_TEMPERATURE_ONLY) and request.temperature != 1.0:
             raise ValueError(
-                f"{request.model!r} only accepts the default temperature. "
-                "Leave temperature unset for gpt-6 deployments."
+                f"{request.model!r} only accepts the default temperature, 1.0, got "
+                f"{request.temperature}. Leave temperature unset or pass 1.0."
             )
         kwargs["temperature"] = request.temperature
     clash = set(request.extra) & set(kwargs)

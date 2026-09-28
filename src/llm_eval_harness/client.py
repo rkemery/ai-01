@@ -2,11 +2,20 @@
 
 Typical stack, outermost first:
 
-    DollarCap(CachedClient(RetryingClient(FoundryClient(), retry_on=...), "cache/"), cap_usd=5)
+    CachedClient(
+        RetryingClient(DollarCap(FoundryClient(), cap_usd=5), retry_on=retryable_errors()),
+        "cache/",
+    )
 
-The cap sees every call, the cache answers repeats for free, and only cache
-misses reach the network. In CI the cache runs with `replay_only=True` and no
-inner client, so a missing entry fails loudly instead of calling a model.
+The cache answers repeats for free, so only misses go further. The retry
+wrapper retries rate limits and timeouts. The cap checks every attempt that
+would reach the network and refuses any whose worst-case cost could take spend
+past the cap. In CI the cache runs with `replay_only=True` and no inner client,
+so a missing entry fails loudly instead of calling a model.
+
+For repeated trials of one prompt (pass^k), give each trial its own `trial`
+index. The index is part of the cache key and is never sent to the model, so k
+trials get k independent replies, and a replay returns the same k replies.
 """
 
 from __future__ import annotations
@@ -29,6 +38,8 @@ class ModelRequest:
 
     `input` is a string or a list of chat messages ({"role": ..., "content": ...}).
     `extra` holds any other request parameters and is passed through to the SDK.
+    `trial` numbers repeated samples of the same request. It only separates
+    their cache entries and is not sent to the model.
     """
 
     model: str
@@ -38,6 +49,7 @@ class ModelRequest:
     temperature: float | None = None
     reasoning_effort: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    trial: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model:
@@ -48,12 +60,18 @@ class ModelRequest:
             type(self.max_output_tokens) is not int or self.max_output_tokens <= 0
         ):
             raise ValueError("max_output_tokens must be a positive int")
+        if type(self.trial) is not int or self.trial < 0:
+            raise ValueError(f"trial must be a non-negative int, got {self.trial!r}")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def canonical_json(self) -> str:
-        """Sorted keys, no whitespace, UTF-8 kept as is. Raises TypeError if not JSON-safe."""
+        """Sorted keys, no whitespace, UTF-8 kept as is, integral floats written as ints.
+
+        So temperature=0 and temperature=0.0 give the same key. Raises TypeError if
+        the request is not JSON-safe.
+        """
         return _canonical(self.to_dict())
 
     def cache_key(self) -> str:
@@ -161,6 +179,11 @@ class CachedClient:
 
     With `replay_only=True` a miss raises `CacheMiss` and the inner client is
     never called. Use that in CI.
+
+    Only complete replies (`finish_reason == "stop"`) are stored. A reply cut
+    off by max_output_tokens or a content filter is returned but not cached, so
+    it is never replayed as if it were the model's answer. `not_stored` counts
+    those.
     """
 
     def __init__(
@@ -173,6 +196,7 @@ class CachedClient:
         self.replay_only = replay_only
         self.hits = 0
         self.misses = 0
+        self.not_stored = 0
 
     def path_for(self, request: ModelRequest) -> Path:
         key = request.cache_key()
@@ -190,7 +214,10 @@ class CachedClient:
                 f"{self.cache_dir}. Record it with a live client and replay_only=False."
             )
         response = self._inner.complete(request)
-        _store_cached(path, request, response)
+        if response.finish_reason == "stop":
+            _store_cached(path, request, response)
+        else:
+            self.not_stored += 1
         return response
 
 
@@ -214,7 +241,7 @@ DEFAULT_PRICES: dict[str, Price] = {
 
 
 class BudgetExceeded(RuntimeError):
-    """The dollar cap has been reached, so the next call was refused."""
+    """The next call could take spend past the dollar cap, so it was refused."""
 
 
 class UnknownModelPrice(ValueError):
@@ -238,14 +265,50 @@ def cost_usd(price: Price, response: ModelResponse) -> float:
     return total / 1_000_000
 
 
-class DollarCap:
-    """Client wrapper that tracks spend from `usage` and stops at a hard cap.
+# Chat-format tokens a provider may add around the text (role markers, reply priming).
+CHAT_FORMAT_ALLOWANCE_TOKENS = 64
 
-    The check happens before each call: once `spent_usd >= cap_usd` every further
-    call raises `BudgetExceeded`. Spend can therefore pass the cap by at most the
-    cost of the last call made. A model missing from the price table is refused
-    before any call. Replies served from the disk cache cost nothing. Not
-    thread-safe: share one instance per thread, or add a lock if you need to.
+
+def input_token_bound(request: ModelRequest) -> int:
+    """Upper bound on a request's billed input tokens, known before the call.
+
+    Counts one token per UTF-8 byte of the canonical JSON of everything the
+    model is sent (instructions, input, extra), plus
+    `CHAT_FORMAT_ALLOWANCE_TOKENS`. Byte-level BPE tokenizers, which the OpenAI
+    and Llama 3 models use, never produce more tokens than bytes, and the JSON
+    quoting adds more bytes per message than the chat format adds tokens. The
+    bound does not hold for inputs whose tokens are not text bytes, such as
+    images or files referenced by URL in `extra`.
+    """
+    sent = {"instructions": request.instructions, "input": request.input, "extra": request.extra}
+    return len(_canonical(sent).encode("utf-8")) + CHAT_FORMAT_ALLOWANCE_TOKENS
+
+
+def max_cost_usd(price: Price, request: ModelRequest) -> float:
+    """Most one call can cost: `input_token_bound` at the full input rate, plus
+    max_output_tokens (which includes reasoning tokens) at the output rate."""
+    if request.max_output_tokens is None:
+        raise ValueError(
+            f"a call to {request.model!r} has no max_output_tokens, so its cost has no upper "
+            "bound. Set max_output_tokens on every request that goes through DollarCap."
+        )
+    input_rate = max(price.input_per_m, price.cached_input_per_m or 0.0)
+    return (
+        input_token_bound(request) * input_rate + request.max_output_tokens * price.output_per_m
+    ) / 1_000_000
+
+
+class DollarCap:
+    """Client wrapper that tracks spend from `usage` and never lets it pass a hard cap.
+
+    Before each call it computes the call's worst-case cost (`max_cost_usd`)
+    and raises `BudgetExceeded` if `spent_usd` plus that could exceed
+    `cap_usd`. After the call it adds the actual cost from `usage`. So spend
+    stays at or below the cap, as long as the provider bills no more than
+    `input_token_bound` input tokens and max_output_tokens output tokens. A
+    request without max_output_tokens, or for a model missing from the price
+    table, is refused before any call. Replies served from the disk cache cost
+    nothing. Not thread-safe: share one instance per thread, or add a lock.
     """
 
     def __init__(
@@ -272,10 +335,11 @@ class DollarCap:
 
     def complete(self, request: ModelRequest) -> ModelResponse:
         price = self.price_for(request.model)
-        if self.spent_usd >= self.cap_usd:
+        worst = max_cost_usd(price, request)
+        if self.spent_usd + worst > self.cap_usd:
             raise BudgetExceeded(
-                f"spent ${self.spent_usd:.4f} of the ${self.cap_usd:.2f} cap, "
-                f"refusing a call to {request.model!r}"
+                f"spent ${self.spent_usd:.4f} of the ${self.cap_usd:.2f} cap, and a call to "
+                f"{request.model!r} could cost up to ${worst:.4f}. Refusing it."
             )
         response = self._inner.complete(request)
         self.calls += 1
@@ -332,8 +396,23 @@ class RetryingClient:
 
 def _canonical(obj: Any) -> str:
     return json.dumps(
-        obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        _integral_floats_as_ints(obj),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
     )
+
+
+def _integral_floats_as_ints(obj: Any) -> Any:
+    """0.0 -> 0 and 1.0 -> 1 at any depth, so equal numbers serialize alike."""
+    if isinstance(obj, float) and obj.is_integer():
+        return int(obj)
+    if isinstance(obj, dict):
+        return {key: _integral_floats_as_ints(value) for key, value in obj.items()}
+    if isinstance(obj, list | tuple):
+        return [_integral_floats_as_ints(value) for value in obj]
+    return obj
 
 
 def _word_count(request: ModelRequest) -> int:
