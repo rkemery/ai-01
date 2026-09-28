@@ -62,10 +62,19 @@ def fake_identity(monkeypatch: pytest.MonkeyPatch) -> FakeIdentityModule:
     return module
 
 
-def test_key_auth_uses_key_default_url_and_no_sdk_retries(fake_openai: FakeOpenAIModule) -> None:
-    azure.build_sdk_client({"AZURE_OPENAI_API_KEY": "k-123"})
+BASE_URL = "https://example.test/openai/v1/"
+
+
+def test_key_auth_uses_key_env_url_and_no_sdk_retries(fake_openai: FakeOpenAIModule) -> None:
+    azure.build_sdk_client({"AZURE_OPENAI_API_KEY": "k-123", "AZURE_OPENAI_BASE_URL": BASE_URL})
     (kwargs,) = fake_openai.created
-    assert kwargs == {"base_url": azure.DEFAULT_BASE_URL, "api_key": "k-123", "max_retries": 0}
+    assert kwargs == {"base_url": BASE_URL, "api_key": "k-123", "max_retries": 0}
+
+
+def test_missing_base_url_raises(fake_openai: FakeOpenAIModule) -> None:
+    with pytest.raises(ValueError, match="AZURE_OPENAI_BASE_URL"):
+        azure.build_sdk_client({"AZURE_OPENAI_API_KEY": "k-123"})
+    assert fake_openai.created == []
 
 
 def test_entra_auth_when_no_key(
@@ -83,7 +92,9 @@ def test_entra_auth_when_no_key(
 def test_entra_scope_from_env(
     fake_openai: FakeOpenAIModule, fake_identity: FakeIdentityModule
 ) -> None:
-    azure.build_sdk_client({"AZURE_OPENAI_TOKEN_SCOPE": "api://custom/.default"})
+    azure.build_sdk_client(
+        {"AZURE_OPENAI_TOKEN_SCOPE": "api://custom/.default", "AZURE_OPENAI_BASE_URL": BASE_URL}
+    )
     assert fake_identity.scopes == ["api://custom/.default"]
 
 
@@ -216,6 +227,8 @@ def test_names_used_exist_in_the_installed_sdk() -> None:
 def test_real_sdk_client_is_configured_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """Build a real openai.OpenAI with a dummy key. Construction makes no request."""
     pytest.importorskip("openai")
-    client = azure.build_sdk_client({"AZURE_OPENAI_API_KEY": "dummy-not-a-real-key"})
+    client = azure.build_sdk_client(
+        {"AZURE_OPENAI_API_KEY": "dummy-not-a-real-key", "AZURE_OPENAI_BASE_URL": BASE_URL}
+    )
     assert client.max_retries == 0
-    assert str(client.base_url) == azure.DEFAULT_BASE_URL
+    assert str(client.base_url) == BASE_URL

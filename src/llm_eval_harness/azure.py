@@ -4,7 +4,7 @@ Needs the `azure` extra: pip install "llm-eval-harness[azure]".
 
 Configuration comes from the environment:
 
-- AZURE_OPENAI_BASE_URL     (default: the portfolio's Foundry v1 endpoint)
+- AZURE_OPENAI_BASE_URL     (required, e.g. https://<resource>.openai.azure.com/openai/v1/)
 - AZURE_OPENAI_API_KEY      (if set, key auth is used)
 - AZURE_OPENAI_TOKEN_SCOPE  (Entra ID scope, default cognitiveservices)
 
@@ -30,7 +30,6 @@ from typing import Any
 
 from llm_eval_harness.client import ModelRequest, ModelResponse
 
-DEFAULT_BASE_URL = "https://rkemery-ai-portfolio.openai.azure.com/openai/v1/"
 DEFAULT_TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
 
 # gpt-6 deployments reject any temperature other than the default.
@@ -52,7 +51,12 @@ def build_sdk_client(env: Mapping[str, str] | None = None) -> Any:
     """Create an `openai.OpenAI` client for the Foundry v1 endpoint with max_retries=0."""
     env = os.environ if env is None else env
     openai = _require("openai")
-    base_url = env.get("AZURE_OPENAI_BASE_URL") or DEFAULT_BASE_URL
+    base_url = env.get("AZURE_OPENAI_BASE_URL")
+    if not base_url:
+        raise ValueError(
+            "AZURE_OPENAI_BASE_URL is not set. Point it at your Foundry resource's v1 "
+            "endpoint, e.g. https://<resource>.openai.azure.com/openai/v1/"
+        )
     api_key: str | Callable[[], str]
     key = env.get("AZURE_OPENAI_API_KEY")
     if key:

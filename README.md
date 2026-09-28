@@ -163,7 +163,7 @@ client = DollarCap(
 )
 ```
 
-`FoundryClient` reads `AZURE_OPENAI_BASE_URL` (defaults to this portfolio's Foundry v1 endpoint) and uses `AZURE_OPENAI_API_KEY` if it is set. Otherwise it signs in with Entra ID through `DefaultAzureCredential`, with the scope from `AZURE_OPENAI_TOKEN_SCOPE` (default `https://cognitiveservices.azure.com/.default`).
+`FoundryClient` reads `AZURE_OPENAI_BASE_URL` (required, your Foundry resource's `/openai/v1/` endpoint) and uses `AZURE_OPENAI_API_KEY` if it is set. Otherwise it signs in with Entra ID through `DefaultAzureCredential`, with the scope from `AZURE_OPENAI_TOKEN_SCOPE` (default `https://cognitiveservices.azure.com/.default`).
 
 ## The results contract
 
