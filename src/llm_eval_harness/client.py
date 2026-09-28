@@ -230,8 +230,8 @@ class Price:
     cached_input_per_m: float | None = None
 
 
-# List prices from PLAN.md (Azure Foundry, Global Standard, 2026-09-28). Keys are
-# deployment names, which is what requests carry.
+# Azure Foundry list prices (Global Standard, Azure Retail Prices API, 2026-09-28).
+# Keys are deployment names, which is what requests carry.
 DEFAULT_PRICES: dict[str, Price] = {
     "gpt-6-luna": Price(0.10, 0.50, 0.01),
     "gpt-6-sol": Price(2.00, 10.00, 0.20),

@@ -75,11 +75,10 @@ Regressions (candidate - baseline, paired by item_id). A drop blocks when signif
 ```bash
 git clone https://github.com/rkemery/llm-eval-harness.git
 cd llm-eval-harness
-git fetch origin pull/1/head:pr-1 && git checkout pr-1   # only until PR #1 merges
 uv run llm-eval demo
 ```
 
-Until PR #1 merges, `main` holds only the initial commit and the code lives on the PR's branch, which the `git fetch` line checks out. Once it merges and becomes `main` for the v0.1.0 release, skip that line. `uv run` creates the environment on first use. `make test` runs the test suite and `make lint` runs ruff.
+`uv run` creates the environment on first use. `make test` runs the test suite and `make lint` runs ruff.
 
 Calibrate the synthetic judge against the synthetic labels and correct the baseline's pass rates:
 
@@ -109,7 +108,7 @@ The `llm-eval` CLI wraps these: `stats`, `report`, `label`, `split`, `calibrate`
 
 ## How the planned repos will use it
 
-Four more repos are planned to build on the harness. None of them exists yet. Each is to pin the harness by git tag, write its runs in the same JSONL format and gate its PRs with `llm-eval gate`.
+Four more repos in this portfolio are being built on the harness. Each pins it by git tag, writes its runs in the same JSONL format and gates its PRs with `llm-eval gate`.
 
 ```mermaid
 flowchart LR
@@ -122,7 +121,7 @@ flowchart LR
 
 ## Using it from another repo
 
-Install pinned to a tag. The `v0.1.0` tag is created at release, when PR #1 merges, so until then these commands fail.
+Install pinned to a tag:
 
 ```bash
 uv add "llm-eval-harness @ git+https://github.com/rkemery/llm-eval-harness@v0.1.0"
