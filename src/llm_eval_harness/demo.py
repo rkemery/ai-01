@@ -101,10 +101,10 @@ def run_demo(data_dir: str | Path = DEFAULT_DATA_DIR) -> str:
     errored = [r for r in candidate if r.error is not None]
     lines = [
         "> **Synthetic data.** Every number below comes from simulated answers, a simulated",
-        "> judge and simulated human labels in `examples/synthetic/`. They show what the",
+        "> judge and simulated reference labels in `examples/synthetic/`. They show what the",
         "> tools print. They are not results about any model.",
         "",
-        f"**Judge vs human labels** on the {n_test}-item test split "
+        f"**Judge vs reference labels** on the {n_test}-item test split "
         f"(dev split of {len(split.dev)} held out for prompt tuning). "
         "TPR and TNR with Wilson 95% CIs, kappa with a bootstrap 95% CI.",
         "",
