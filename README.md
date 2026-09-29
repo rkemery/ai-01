@@ -111,6 +111,7 @@ Four repos in this portfolio build on the harness. Each pins it to v0.1.0, write
 - [guarded-llm-gateway](https://github.com/rkemery/guarded-llm-gateway): clustered Wilson intervals for detector and attack rates.
 
 None of them runs `llm-eval gate` in CI yet.
+
 ## Using it from another repo
 
 Install pinned to a tag:
@@ -246,7 +247,7 @@ Wilson and Korn-Graubard intervals for pass rates, CR1 clustered SEs with t on G
 - `DollarCap` keeps spend under the cap only if the provider bills at most one input token per UTF-8 byte of the request (plus 64 for chat formatting) and at most `max_output_tokens` output tokens. Images or files referenced by URL in `extra` break that bound. `DollarCap` is not thread-safe. Prices are list prices as of 2026-09-28 and are hard-coded.
 - The cache key does not include a deployment's model version. If a deployment is upgraded in place, clear the cache.
 
-<details><summary>Ten more</summary>
+<details><summary>More limitations</summary>
 
 - Without clustering, the comparison table shows a bootstrap CI next to the exact McNemar p-value, and they can disagree when only a few pairs are discordant (4 of 40 regressing: the CI excludes 0, but p = 0.125). The gate decides on the p-value.
 - The design effect is floored at 1. Real negative correlation within clusters, which would narrow an interval, is ignored on purpose.
