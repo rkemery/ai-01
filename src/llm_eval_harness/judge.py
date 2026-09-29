@@ -7,9 +7,8 @@ Likert scales. The gold reference answer goes into the prompt, which is the
 reference-guided setup from Zheng et al. (2023, arXiv 2306.05685).
 
 Replies must be strict JSON, with no duplicate keys. Anything else raises
-`JudgeParseError`.
-`ChecklistJudge.score` turns that into an error on the result, so a garbled
-reply never counts as a pass.
+`JudgeParseError`. `ChecklistJudge.score` turns that into an error on the
+result, so a garbled reply never counts as a pass.
 """
 
 from __future__ import annotations
@@ -47,12 +46,16 @@ class JudgeParseError(ValueError):
 
 @dataclass(frozen=True)
 class ChecklistItem:
+    """One yes/no checklist question."""
+
     id: str
     question: str
 
 
 @dataclass(frozen=True)
 class Checklist:
+    """A named set of checklist questions with unique ids."""
+
     name: str
     items: tuple[ChecklistItem, ...]
 
@@ -97,12 +100,16 @@ def load_template(name: str) -> str:
 
 @dataclass(frozen=True)
 class CheckResult:
+    """The judge's verdict and reason for one checklist question."""
+
     passed: bool
     reason: str
 
 
 @dataclass(frozen=True)
 class ChecklistVerdict:
+    """Per-question results for one answer, plus the judge's model response."""
+
     results: dict[str, CheckResult]
     response: ModelResponse
 
@@ -267,6 +274,8 @@ class PairwiseVerdict:
 
 @dataclass(frozen=True)
 class PairwiseSummary:
+    """Win, tie and flip counts over pairwise judgments, with a flip-rate CI."""
+
     n: int
     a_wins: int
     b_wins: int
