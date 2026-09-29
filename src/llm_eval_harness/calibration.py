@@ -3,7 +3,7 @@
 Positive means "pass". TPR is the share of human passes the judge also passes,
 TNR the share of human fails the judge also fails.
 
-The workflow the plan requires:
+Intended workflow:
 
 1. `split_dev_test` the labeled items once, with a fixed seed, and save it.
 2. Tune the judge prompt on dev labels only.
@@ -38,6 +38,8 @@ class CalibrationError(ValueError):
 
 @dataclass(frozen=True)
 class Confusion:
+    """Confusion counts of judge verdicts against human labels, pass as positive."""
+
     tp: int
     fn: int
     tn: int
@@ -50,6 +52,8 @@ class Confusion:
 
 @dataclass(frozen=True)
 class JudgeAgreement:
+    """Judge vs human TPR and TNR (Wilson CIs) and Cohen's kappa (bootstrap CI)."""
+
     n: int
     confusion: Confusion
     tpr: Interval
@@ -79,6 +83,8 @@ class CorrectedPassRate:
 
 @dataclass(frozen=True)
 class Split:
+    """A seeded dev/test split of labeled item ids. The two parts never overlap."""
+
     seed: int
     dev: tuple[str, ...]
     test: tuple[str, ...]

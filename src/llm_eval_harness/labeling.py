@@ -107,6 +107,8 @@ class LabelItem:
 
 @dataclass(frozen=True)
 class SessionResult:
+    """What one labeling session did, and whether it stopped before the target."""
+
     labeled_now: int
     total_labeled: int
     target: int

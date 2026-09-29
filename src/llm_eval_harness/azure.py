@@ -105,8 +105,8 @@ def request_kwargs(request: ModelRequest) -> dict[str, Any]:
 def parse_response(response: Any, latency_ms: float) -> ModelResponse:
     """Build a `ModelResponse` from an OpenAI `Response` object.
 
-    Raises `ValueError` when usage is missing, because a call we cannot bill is a
-    call we cannot account for.
+    Raises `ValueError` when usage is missing, because a call with no usage cannot
+    be billed or checked against the cap.
     """
     usage = response.usage
     if usage is None:

@@ -224,7 +224,7 @@ def test_names_used_exist_in_the_installed_sdk() -> None:
     assert all(issubclass(e, openai.OpenAIError) for e in azure.retryable_errors())
 
 
-def test_real_sdk_client_is_configured_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_real_sdk_client_is_configured_without_network() -> None:
     """Build a real openai.OpenAI with a dummy key. Construction makes no request."""
     pytest.importorskip("openai")
     client = azure.build_sdk_client(

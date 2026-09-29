@@ -85,7 +85,7 @@ class ModelResponse:
     `output_tokens` is the billed output count and includes `reasoning_tokens`,
     as in the OpenAI `usage` object. `cached_input_tokens` is the part of
     `input_tokens` served from the provider's prompt cache. `from_cache` is True
-    when the reply came from our disk cache and cost nothing this time.
+    when the reply came from the local disk cache and cost nothing this time.
     """
 
     text: str
@@ -113,6 +113,8 @@ class ModelResponse:
 
 @runtime_checkable
 class ModelClient(Protocol):
+    """Anything that turns a `ModelRequest` into a `ModelResponse`."""
+
     def complete(self, request: ModelRequest) -> ModelResponse: ...
 
 
@@ -286,8 +288,11 @@ def input_token_bound(request: ModelRequest) -> int:
 
 
 def max_cost_usd(price: Price, request: ModelRequest) -> float:
-    """Most one call can cost: `input_token_bound` at the full input rate, plus
-    max_output_tokens (which includes reasoning tokens) at the output rate."""
+    """Return the most one call can cost.
+
+    That is `input_token_bound` at the full input rate, plus max_output_tokens
+    (which includes reasoning tokens) at the output rate.
+    """
     if request.max_output_tokens is None:
         raise ValueError(
             f"a call to {request.model!r} has no max_output_tokens, so its cost has no upper "

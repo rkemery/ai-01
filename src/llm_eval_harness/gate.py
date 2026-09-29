@@ -47,6 +47,8 @@ _METRIC = re.compile(r"^([A-Za-z0-9_.-]+)(?::(higher|lower))?$")
 
 @dataclass(frozen=True)
 class Floor:
+    """A hard floor on one metric: any single violation blocks."""
+
     metric: str
     bound: Literal["max", "min"]
     threshold: float
@@ -68,6 +70,8 @@ class Floor:
 
 @dataclass(frozen=True)
 class GateMetric:
+    """A metric checked for regression, and which direction is better."""
+
     name: str
     higher_is_better: bool = True
 
@@ -82,6 +86,8 @@ class GateMetric:
 
 @dataclass(frozen=True)
 class FloorResult:
+    """One floor checked against the candidate run."""
+
     floor: Floor
     n_checked: int
     violations: tuple[str, ...]
@@ -108,6 +114,8 @@ class RegressionResult:
 
 @dataclass(frozen=True)
 class GateResult:
+    """Every floor and regression check. Exit code 0 passes, 1 blocks."""
+
     floors: tuple[FloorResult, ...]
     regressions: tuple[RegressionResult, ...]
 
@@ -214,8 +222,7 @@ def format_gate(result: GateResult) -> str:
             "Regressions (candidate - baseline, paired by item_id). "
             f"A drop blocks when significant at the {ALPHA:.0%} level."
         )
-        for r in result.regressions:
-            lines.append(_regression_line(r))
+        lines.extend(_regression_line(r) for r in result.regressions)
     return "\n".join(lines)
 
 
