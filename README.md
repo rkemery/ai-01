@@ -14,7 +14,7 @@ cd llm-eval-harness
 uv run llm-eval demo
 ```
 
-Offline, no keys. `make demo` rewrites Results.
+Offline, no keys. Rewrites Results below.
 
 ## Results
 
@@ -99,7 +99,7 @@ Bootstrap replicates dropped because TPR* + TNR* <= 1, where the correction is u
 | `azure` | `FoundryClient` for Azure Foundry over the OpenAI v1 endpoint (extra: `azure`). |
 | `inspect_adapter` | Converts Inspect AI logs to `EvalRecord`s (extra: `inspect`). |
 
-The `llm-eval` CLI wraps these: `stats`, `report`, `label`, `split`, `calibrate`, `gate` and `demo`. Run `llm-eval <command> --help` for the flags.
+The `llm-eval` CLI wraps these: `stats`, `report`, `label`, `split`, `calibrate`, `gate` and `demo`.
 
 ## How the other repos use it
 
@@ -110,10 +110,7 @@ Four repos in this portfolio build on the harness. Each pins it to v0.1.0, write
 - [support-triage-agents](https://github.com/rkemery/support-triage-agents): pass^k over repeated trials, clustered paired comparisons, the dollar cap.
 - [guarded-llm-gateway](https://github.com/rkemery/guarded-llm-gateway): clustered Wilson intervals for detector and attack rates.
 
-None of them runs `llm-eval gate` in CI yet. Their CI runs lint, tests and an offline demo that must leave the README unchanged.
-
-No one labeled data for this portfolio, so the RAG repo calibrates its judges on perturbations with labels known by construction and on RAGTruth's published annotations.
-
+None of them runs `llm-eval gate` in CI yet.
 ## Using it from another repo
 
 Install pinned to a tag:
@@ -148,8 +145,9 @@ write_records("results/candidate.jsonl", records)
 
 baseline = read_records("results/baseline.jsonl")
 candidate = read_records("results/candidate.jsonl")
-print(summarize_metric(candidate, "correct", use_clusters=True).interval)
-print(compare_runs(baseline, candidate, "correct", use_clusters=True).comparison)
+# use_clusters=True needs records from at least 2 clusters.
+print(summarize_metric(candidate, "correct").interval)
+print(compare_runs(baseline, candidate, "correct").comparison)
 ```
 
 Gate a PR in CI:
@@ -242,19 +240,20 @@ Wilson and Korn-Graubard intervals for pass rates, CR1 clustered SEs with t on G
 
 ## Limitations
 
-- The clustered intervals rest on t approximations with G - 1 degrees of freedom. They covered 95 to 97% at 8 equal-sized clusters in simulation. With fewer clusters (below about 5) or very unequal cluster sizes, expect less. The Korn-Graubard Wilson interval leans conservative.
+- Expect less than 95% coverage below about 5 clusters or with very unequal cluster sizes. The Korn-Graubard Wilson interval leans conservative.
 - The corrected pass rate still resamples the test side with a percentile bootstrap, over clusters when `--cluster` is given (the demo does this), and that undercovers with few clusters. Dropping replicates where TPR* + TNR* <= 1 conditions the interval on an informative judge. The count is printed, and if it is more than a few percent of the replicates, the interval means little.
 - The Rogan-Gladen correction assumes the judge's TPR and TNR on the labeled answers carry over to the answers being corrected. The demo calibrates on candidate answers and corrects the baseline, which leans on that assumption.
 - `DollarCap` keeps spend under the cap only if the provider bills at most one input token per UTF-8 byte of the request (plus 64 for chat formatting) and at most `max_output_tokens` output tokens. Images or files referenced by URL in `extra` break that bound. `DollarCap` is not thread-safe. Prices are list prices as of 2026-09-28 and are hard-coded.
 - The cache key does not include a deployment's model version. If a deployment is upgraded in place, clear the cache.
 
-<details><summary>Nine more</summary>
+<details><summary>Ten more</summary>
 
+- Without clustering, the comparison table shows a bootstrap CI next to the exact McNemar p-value, and they can disagree when only a few pairs are discordant (4 of 40 regressing: the CI excludes 0, but p = 0.125). The gate decides on the p-value.
 - The design effect is floored at 1. Real negative correlation within clusters, which would narrow an interval, is ignored on purpose.
 - The exact McNemar test assumes independent pairs, so it is only used without `--cluster`. With `--cluster`, pass/fail comparisons use the clustered t-test, whose t reference is itself approximate for differences that only take the values -1, 0 and 1.
 - The paired binary MDE holds the discordant rate at its observed value. The unpaired MDE against a same-size run and the clustered MDE are normal and t approximations. The unpaired one uses its CI's degrees of freedom (G - 1 when clustered), although two independent runs would have more, so it errs on the large side.
 - Means of continuous metrics (latency, cost) use a t interval, which is rough for skewed data at small n.
-- Labels from one source give no inter-rater agreement.
+- Labels from one source give no inter-rater agreement. No one labeled data for this portfolio: the RAG repo calibrates its judges on perturbations with labels known by construction and on RAGTruth's published annotations.
 - `CachedClient` stores only complete replies. A call that raises (a provider's content-filter refusal, for example) or stops at `max_output_tokens` is not cached, so replaying a run that hit one stops with `CacheMiss` at that call.
 - The errored items the gate still leaves out can hide part of a regression if errors hit hard items more often. Counting candidate errors as failures errs the other way: a judge reply that fails to parse counts against the candidate.
 - The Azure client is tested with the SDK mocked, plus a check that every SDK name it uses exists in the installed `openai` package. Live key and Entra ID auth are not exercised by these tests.
@@ -281,13 +280,15 @@ CI runs lint and tests on Python 3.11 and 3.12 with no secrets.
 
 `make install` adds the optional `azure` and `inspect` extras. Without them, 3 tests are skipped.
 
-Calibrate the synthetic judge against the synthetic labels and correct the baseline's pass rates:
+<details><summary>Calibrate the synthetic judge and correct the baseline's pass rates</summary>
 
 ```bash
 uv run llm-eval calibrate --judge examples/synthetic/candidate.jsonl \
   --labels examples/synthetic/human_labels.jsonl --split examples/synthetic/split.json \
   --apply examples/synthetic/baseline.jsonl
 ```
+
+</details>
 
 ## How I built this
 
