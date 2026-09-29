@@ -1,7 +1,7 @@
 # llm-eval-harness
 
-A small Python toolkit for LLM evals that stay honest at small sample sizes: one JSONL results format, error bars that fit the data, a binary checklist judge calibrated against human labels, and a CI gate.
-The core needs only numpy and scipy, so the four repos planned to build on it can import it without pulling in a framework.
+A small Python toolkit for LLM evals that stay honest at small sample sizes: one JSONL results format, error bars that fit the data, a binary checklist judge calibrated against labeled examples, and a CI gate.
+The core needs only numpy and scipy, so the four other repos in this portfolio import it without pulling in a framework.
 
 ## Demo output
 
@@ -9,10 +9,10 @@ The core needs only numpy and scipy, so the four repos planned to build on it ca
 
 <!-- demo:start -->
 > **Synthetic data.** Every number below comes from simulated answers, a simulated
-> judge and simulated human labels in `examples/synthetic/`. They show what the
+> judge and simulated reference labels in `examples/synthetic/`. They show what the
 > tools print. They are not results about any model.
 
-**Judge vs human labels** on the 30-item test split (dev split of 10 held out for prompt tuning). TPR and TNR with Wilson 95% CIs, kappa with a bootstrap 95% CI.
+**Judge vs reference labels** on the 30-item test split (dev split of 10 held out for prompt tuning). TPR and TNR with Wilson 95% CIs, kappa with a bootstrap 95% CI.
 
 | Check | n | TPR | TNR | Cohen's kappa |
 |---|---|---|---|---|
@@ -78,7 +78,7 @@ cd llm-eval-harness
 uv run llm-eval demo
 ```
 
-`uv run` creates the environment on first use. `make test` runs the test suite and `make lint` runs ruff.
+`uv run` creates the environment on first use. `make test` runs the test suite and `make lint` runs ruff. Run `make install` first to get the optional `azure` and `inspect` extras, or 3 of the tests are skipped.
 
 Calibrate the synthetic judge against the synthetic labels and correct the baseline's pass rates:
 
@@ -106,17 +106,26 @@ uv run llm-eval calibrate --judge examples/synthetic/candidate.jsonl \
 
 The `llm-eval` CLI wraps these: `stats`, `report`, `label`, `split`, `calibrate`, `gate` and `demo`. Run `llm-eval <command> --help` for the flags.
 
-## How the planned repos will use it
+## How the other repos use it
 
-Four more repos in this portfolio are being built on the harness. Each pins it by git tag, writes its runs in the same JSONL format and gates its PRs with `llm-eval gate`.
+Four repos in this portfolio build on the harness. Each pins it by git tag, writes its runs in the same JSONL format and makes every live model call through `FoundryClient` wrapped in `DollarCap` and `CachedClient`, so each README renders from committed records with no keys.
+
+- [rag-support-assistant](https://github.com/rkemery/rag-support-assistant): the checklist judge (two judges, frozen after dev), judge agreement with kappa intervals, clustered comparisons of the retrieval grid.
+- [banking77-lora-vs-frontier](https://github.com/rkemery/banking77-lora-vs-frontier): exact McNemar MDEs, paired bootstrap CIs, cost from token usage.
+- [support-triage-agents](https://github.com/rkemery/support-triage-agents): pass^k over repeated trials, clustered paired comparisons, the dollar cap.
+- [guarded-llm-gateway](https://github.com/rkemery/guarded-llm-gateway): clustered Wilson intervals for detector and attack rates.
+
+None of them runs `llm-eval gate` in CI yet. Their CI runs tests and an offline demo.
+
+The judge is calibrated against labeled examples. This portfolio uses no human labels: the RAG repo calibrates its judges on perturbations whose labels are known by construction and on RAGTruth's published annotations. The labeling CLI here is for anyone who does have a labeler.
 
 ```mermaid
 flowchart LR
-    H["llm-eval-harness<br/>records, stats, judge,<br/>calibration, gate"]
-    R["rag-support-assistant"] -- "checklist judge, calibration,<br/>CIs clustered by article" --> H
-    B["banking77-lora-vs-frontier"] -- "McNemar, bootstrap CIs,<br/>cost from usage" --> H
-    A["support-triage-agents"] -- "pass^k over trials,<br/>McNemar, dollar cap" --> H
-    G["guarded-llm-gateway"] -- "Wilson CIs, hard floors<br/>in the CI gate" --> H
+    H["llm-eval-harness<br/>records, stats, judge,<br/>calibration, clients"]
+    R["rag-support-assistant"] -- "checklist judge, agreement,<br/>clustered CIs" --> H
+    B["banking77-lora-vs-frontier"] -- "McNemar MDE, bootstrap CIs,<br/>cost from usage" --> H
+    A["support-triage-agents"] -- "pass^k over trials,<br/>paired tests, dollar cap" --> H
+    G["guarded-llm-gateway"] -- "clustered Wilson CIs,<br/>cached live calls" --> H
 ```
 
 ## Using it from another repo
@@ -241,7 +250,8 @@ One JSON object per line, one line per item per run. Repeated trials of the same
 - The corrected pass rate still resamples the test side with a percentile bootstrap, over clusters when `--cluster` is given (the demo does this), and that undercovers with few clusters. Dropping replicates where TPR* + TNR* <= 1 conditions the interval on an informative judge. The count is printed, and if it is more than a few percent of the replicates, the interval means little.
 - Means of continuous metrics (latency, cost) use a t interval, which is rough for skewed data at small n.
 - The Rogan-Gladen correction assumes the judge's TPR and TNR on the labeled answers carry over to the answers being corrected. The demo calibrates on candidate answers and corrects the baseline, which leans on that assumption.
-- One human labeler means no inter-rater agreement.
+- Labels from one source give no inter-rater agreement.
+- `CachedClient` stores only complete replies. A call that raises (a provider's content-filter refusal, for example) or stops at `max_output_tokens` is not cached, so replaying a run that hit one stops with `CacheMiss` at that call. Two of the consumer repos document this.
 - With `--on-error exclude`, the gate still leaves out errored items of numeric metrics and items that errored in the baseline, up to 5% by default. If errors hit hard items more often, those exclusions can hide part of a regression. Counting candidate errors as failures errs the other way: a judge reply that fails to parse counts against the candidate.
 - `DollarCap` keeps spend under the cap only if the provider bills at most one input token per UTF-8 byte of the request (plus 64 for chat formatting) and at most `max_output_tokens` output tokens. Images or files referenced by URL in `extra` break that bound. The bound is conservative, and a failed attempt (even a rate-limit refusal that was never billed) is charged its full worst case, so a cap can refuse a call while real headroom remains. It is not thread-safe. Prices are list prices as of 2026-09-28 and are hard-coded.
 - The cache key does not include a deployment's model version. If a deployment is upgraded in place, clear the cache.
@@ -251,7 +261,7 @@ One JSON object per line, one line per item per run. Repeated trials of the same
 
 ## Cost
 
-The demo and the test suite make no model calls and cost $0. Live runs will happen in the four planned repos, and their READMEs will report what they cost.
+The demo and the test suite make no model calls and cost $0. The four other repos report what their live runs cost in their own READMEs.
 
 ## Development
 

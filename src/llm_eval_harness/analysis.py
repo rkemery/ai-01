@@ -172,7 +172,7 @@ def compare_runs(
     McNemar MDE at the observed discordant rate (`mde_paired_binary`, None
     when no effect up to that rate reaches 80% power). With clusters it is
     (t_{G-1, 0.975} + t_{G-1, 0.8}) * SE, and without clusters for a numeric
-    metric (z_{0.975} + z_{0.8}) * SE. It is None when no pair disagrees.
+    metric (t_{n-1, 0.975} + t_{n-1, 0.8}) * SE. It is None when no pair disagrees.
     """
     a = metric_column(baseline, metric, on_error=on_error)
     b = metric_column(candidate, metric, on_error=on_error)

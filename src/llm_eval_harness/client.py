@@ -205,8 +205,9 @@ class CachedClient:
     def complete(self, request: ModelRequest) -> ModelResponse:
         path = self.path_for(request)
         if path.exists():
+            response = _load_cached(path, request)
             self.hits += 1
-            return _load_cached(path, request)
+            return response
         self.misses += 1
         if self.replay_only or self._inner is None:
             raise CacheMiss(
