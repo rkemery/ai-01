@@ -100,9 +100,25 @@ def run_demo(data_dir: str | Path = DEFAULT_DATA_DIR) -> str:
     n_test = len(split.test)
     errored = [r for r in candidate if r.error is not None]
     lines = [
-        "> **Synthetic data.** Every number below comes from simulated answers, a simulated",
-        "> judge and simulated reference labels in `examples/synthetic/`. They show what the",
-        "> tools print. They are not results about any model.",
+        "> **Synthetic data.** Simulated answers, judge and labels from `examples/synthetic/`. "
+        "They show what the tools print, not results about any model.",
+        "",
+        "**Candidate vs baseline**, paired by item, clustered by article.",
+        "",
+        comparison_table(comparisons),
+        "",
+        comparison_methods_line(comparisons),
+        "",
+        f"**CI gate** (`llm-eval gate`), exit code {gate.exit_code}:",
+        "",
+        "The gate counts an item that errored only in the candidate as a failure, so its "
+        "numbers differ from the table above, which leaves errored items out.",
+        "",
+        "```text",
+        format_gate(gate),
+        "```",
+        "",
+        "<details><summary>Judge agreement, single-run summary, corrected pass rates</summary>",
         "",
         f"**Judge vs reference labels** on the {n_test}-item test split "
         f"(dev split of {len(split.dev)} held out for prompt tuning). "
@@ -127,14 +143,8 @@ def run_demo(data_dir: str | Path = DEFAULT_DATA_DIR) -> str:
             f", including ${sum(r.cost_usd for r in errored):.4f} on {len(errored)} failed "
             "model calls, which the latency and cost means leave out."
             if errored
-            else ". The judge error is a scoring error, so that answer's latency and cost count."
+            else "."
         ),
-        "",
-        "**Candidate vs baseline**, paired by item, clustered by article.",
-        "",
-        comparison_table(comparisons),
-        "",
-        comparison_methods_line(comparisons),
         "",
         "**Baseline pass rate corrected for judge error** (Rogan-Gladen, CI includes "
         "calibration uncertainty).",
@@ -143,14 +153,6 @@ def run_demo(data_dir: str | Path = DEFAULT_DATA_DIR) -> str:
         "",
         corrected_note(corrected),
         "",
-        f"**CI gate** (`llm-eval gate`), exit code {gate.exit_code}:",
-        "",
-        "The gate's numbers differ from the comparison table on purpose. The table "
-        "leaves out items that errored, while the gate counts an item that errored "
-        "only in the candidate as a failure, so errors can never hide a regression.",
-        "",
-        "```text",
-        format_gate(gate),
-        "```",
+        "</details>",
     ]
     return "\n".join(lines)

@@ -8,9 +8,33 @@ The core needs only numpy and scipy, so the four other repos in this portfolio i
 `make demo` (or `uv run llm-eval demo`) runs the whole pipeline offline on 40 synthetic items and rewrites this section. No keys, no network, no model calls.
 
 <!-- demo:start -->
-> **Synthetic data.** Every number below comes from simulated answers, a simulated
-> judge and simulated reference labels in `examples/synthetic/`. They show what the
-> tools print. They are not results about any model.
+> **Synthetic data.** Simulated answers, judge and labels from `examples/synthetic/`. They show what the tools print, not results about any model.
+
+**Candidate vs baseline**, paired by item, clustered by article.
+
+| Metric | Baseline | Candidate | Diff | 95% CI | p | MDE | n |
+|---|---|---|---|---|---|---|---|
+| correct | 64.1% | 82.1% | +17.9 pts | +0.9 pts to +35.0 pts | 0.042 | 23.6 pts | 39 |
+| grounded | 74.4% | 59.0% | -15.4 pts | -46.2 pts to +15.5 pts | 0.277 | 42.6 pts | 39 |
+
+Method: CI from t with CR1 clustered SE (8 clusters, 7 df), p from the clustered t-test, for correct, grounded. Excluded errored items: 1 of 40 from correct (candidate 1, baseline 0), 1 of 40 from grounded (candidate 1, baseline 0).
+
+**CI gate** (`llm-eval gate`), exit code 0:
+
+The gate counts an item that errored only in the candidate as a failure, so its numbers differ from the table above, which leaves errored items out.
+
+```text
+llm-eval gate: PASS
+
+Hard floors (any single violation blocks)
+  [PASS] pii_leak max=0: 0 violations in 40 records
+
+Regressions (candidate - baseline, paired by item_id). A drop blocks when significant at the 5% level.
+  [PASS] correct (higher is better): +0.150, n=40. 95% CI [-0.031, +0.331], clustered t-test p=0.090 (8 clusters). Errored items: 1 of 40 (candidate 1, baseline 0), 1 candidate-only counted as failure, limit 2.
+  [WARN] grounded (higher is better): -0.175, n=40. 95% CI [-0.450, +0.100], clustered t-test p=0.175 (8 clusters). Inconclusive, the MDE at this n is about 0.379. Errored items: 1 of 40 (candidate 1, baseline 0), 1 candidate-only counted as failure, limit 2.
+```
+
+<details><summary>Judge agreement, single-run summary, corrected pass rates</summary>
 
 **Judge vs reference labels** on the 30-item test split (dev split of 10 held out for prompt tuning). TPR and TNR with Wilson 95% CIs, kappa with a bootstrap 95% CI.
 
@@ -34,16 +58,7 @@ MDE against another run of the same size (unpaired, 80% power, alpha 0.05, t qua
 
 CI method: Wilson with Korn-Graubard effective n (8 clusters) for correct, grounded, pii_leak. t with CR1 clustered SE (8 clusters, 7 df) for latency_ms. Excluded errored items: 1 from correct, 1 from grounded.
 
-Simulated cost of the candidate run at gpt-6-luna list prices: $0.0087 for 40 answers. The judge error is a scoring error, so that answer's latency and cost count.
-
-**Candidate vs baseline**, paired by item, clustered by article.
-
-| Metric | Baseline | Candidate | Diff | 95% CI | p | MDE | n |
-|---|---|---|---|---|---|---|---|
-| correct | 64.1% | 82.1% | +17.9 pts | +0.9 pts to +35.0 pts | 0.042 | 23.6 pts | 39 |
-| grounded | 74.4% | 59.0% | -15.4 pts | -46.2 pts to +15.5 pts | 0.277 | 42.6 pts | 39 |
-
-Method: CI from t with CR1 clustered SE (8 clusters, 7 df), p from the clustered t-test, for correct, grounded. Excluded errored items: 1 of 40 from correct (candidate 1, baseline 0), 1 of 40 from grounded (candidate 1, baseline 0).
+Simulated cost of the candidate run at gpt-6-luna list prices: $0.0087 for 40 answers.
 
 **Baseline pass rate corrected for judge error** (Rogan-Gladen, CI includes calibration uncertainty).
 
@@ -54,20 +69,7 @@ Method: CI from t with CR1 clustered SE (8 clusters, 7 df), p from the clustered
 
 Bootstrap replicates dropped because TPR* + TNR* <= 1, where the correction is undefined: correct 0 of 10000, grounded 0 of 10000.
 
-**CI gate** (`llm-eval gate`), exit code 0:
-
-The gate's numbers differ from the comparison table on purpose. The table leaves out items that errored, while the gate counts an item that errored only in the candidate as a failure, so errors can never hide a regression.
-
-```text
-llm-eval gate: PASS
-
-Hard floors (any single violation blocks)
-  [PASS] pii_leak max=0: 0 violations in 40 records
-
-Regressions (candidate - baseline, paired by item_id). A drop blocks when significant at the 5% level.
-  [PASS] correct (higher is better): +0.150, n=40. 95% CI [-0.031, +0.331], clustered t-test p=0.090 (8 clusters). Errored items: 1 of 40 (candidate 1, baseline 0), 1 candidate-only counted as failure, limit 2.
-  [WARN] grounded (higher is better): -0.175, n=40. 95% CI [-0.450, +0.100], clustered t-test p=0.175 (8 clusters). Inconclusive, the MDE at this n is about 0.379. Errored items: 1 of 40 (candidate 1, baseline 0), 1 candidate-only counted as failure, limit 2.
-```
+</details>
 <!-- demo:end -->
 
 ## Quickstart
