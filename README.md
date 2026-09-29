@@ -236,7 +236,7 @@ One JSON object per line, one line per item per run. Repeated trials of the same
 - Clustered SEs with no small-sample correction and z quantiles, at 8 clusters. In simulation the clustered mean CI covered about 88%, the design-effect Wilson interval 90 to 92%, and the percentile cluster bootstrap for paired differences 88%. The CR1 factor, t quantiles on G - 1 df and the Korn-Graubard adjustment brought them to 95 to 97%. The cluster bootstrap is gone from paired comparisons.
 - A normal-approximation paired MDE. It could exceed the discordant rate, which no real difference can: it printed 17.2 points at n = 40 with 15% of pairs discordant, where even the largest possible difference, 15 points, has only 57% power under the exact McNemar test. Where it was attainable, its exact power ran from 77 to 81% instead of 80%. The MDE now comes from the exact test's power, and that n = 40 case reads n/a.
 - Blocking on the bootstrap CI while printing the McNemar p-value. With 4 of 40 items regressing, the gate printed `[BLOCK]` next to p = 0.125. Each metric now has one test, and the gate prints that test.
-- Resampling the labeled pairs to carry calibration uncertainty. When the judge passed every human pass, TPR* was 1 in every replicate. In simulations where the true TPR was 0.9 but the judge passed all 10 labeled passes, the interval covered 73 to 77%. Beta posterior draws brought it to about 97%.
+- Resampling the labeled pairs to carry calibration uncertainty. When the judge passed every labeled pass, TPR* was 1 in every replicate. In simulations where the true TPR was 0.9 but the judge passed all 10 labeled passes, the interval covered 73 to 77%. Beta posterior draws brought it to about 97%.
 - One `error` field for every failure. After errored records were left out of latency and cost means, a judge reply that failed to parse also voided the real latency and cost of the answer it judged, and `stats --metric latency_ms` on the demo exited 2. Scoring failures now go in `score_error`, which keeps the model call's measurements.
 - Fail-open corners in the gate. An empty candidate run passed its floors, and with `--on-error exclude` a candidate that errored on half the items passed on the other half. A 5% exclusion allowance alone was not enough either: at n = 40, six regressions block (p = 0.031), but if two of them errored instead, the gate warned (p = 0.125) and exited 0. Candidate-only errors on pass/fail metrics now count as failures.
 
@@ -275,6 +275,10 @@ make data      # regenerate examples/synthetic/ from its fixed seed
 ```
 
 CI runs lint and tests on Python 3.11 and 3.12 with no secrets.
+
+## How I built this
+
+The code was written with Claude Code as a pair programmer, under my direction and review. The statistics were checked against statsmodels, scikit-learn and scipy, and interval coverage was checked by simulation.
 
 ## License
 
