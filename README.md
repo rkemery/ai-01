@@ -96,7 +96,7 @@ uv run llm-eval calibrate --judge examples/synthetic/candidate.jsonl \
 | `stats` | Wilson intervals (plain and clustered), t intervals with CR1 clustered SEs, paired bootstrap, clustered paired t-test, exact McNemar with an exact-power MDE, pass^k and pass@k. numpy and scipy only. |
 | `analysis` | The same stats applied to lists of records: summarize a run, compare two runs paired by item, pass^k over trials. |
 | `judge` | `ChecklistJudge` (binary, reference-guided, strict JSON) and `PairwiseJudge` (both orders, flip rate). Prompts are plain templates in `prompts/`. |
-| `calibration` | Judge vs human TPR, TNR and Cohen's kappa, the bias-corrected pass rate, and the dev/test split. |
+| `calibration` | Judge vs reference-label TPR, TNR and Cohen's kappa, the bias-corrected pass rate, and the dev/test split. |
 | `labeling` | Blind, randomized, resumable labeling in the terminal. A resumed session must match the labeler, item set, seed and `--n`. |
 | `gate` | CI gate with hard floors and paired regression checks. Exit code 0 passes, 1 blocks. |
 | `report` | Markdown tables and the MDE line, and rewriting a marked README section. |
@@ -108,16 +108,16 @@ The `llm-eval` CLI wraps these: `stats`, `report`, `label`, `split`, `calibrate`
 
 ## How the other repos use it
 
-Four repos in this portfolio build on the harness. Each pins it by git tag, writes its runs in the same JSONL format and makes every live model call through `FoundryClient` wrapped in `DollarCap` and `CachedClient`, so each README renders from committed records with no keys.
+Four repos in this portfolio build on the harness. Each pins it to v0.1.0, writes its runs in the same JSONL format and makes its eval model calls through `FoundryClient` wrapped in `DollarCap` and `CachedClient`, so each README renders from committed records with no keys.
 
 - [rag-support-assistant](https://github.com/rkemery/rag-support-assistant): the checklist judge (two judges, frozen after dev), judge agreement with kappa intervals, clustered comparisons of the retrieval grid.
 - [banking77-lora-vs-frontier](https://github.com/rkemery/banking77-lora-vs-frontier): exact McNemar MDEs, paired bootstrap CIs, cost from token usage.
 - [support-triage-agents](https://github.com/rkemery/support-triage-agents): pass^k over repeated trials, clustered paired comparisons, the dollar cap.
 - [guarded-llm-gateway](https://github.com/rkemery/guarded-llm-gateway): clustered Wilson intervals for detector and attack rates.
 
-None of them runs `llm-eval gate` in CI yet. Their CI runs tests and an offline demo.
+None of them runs `llm-eval gate` in CI yet. Their CI runs lint, tests and an offline demo that must leave the README unchanged.
 
-The judge is calibrated against labeled examples. This portfolio uses no human labels: the RAG repo calibrates its judges on perturbations whose labels are known by construction and on RAGTruth's published annotations. The labeling CLI here is for anyone who does have a labeler.
+The judge is calibrated against labeled examples. Nobody labeled data for this portfolio: the RAG repo calibrates its judges on perturbations whose labels are known by construction and on RAGTruth's published annotations. The labeling CLI here is for anyone who does have a labeler.
 
 ```mermaid
 flowchart LR
