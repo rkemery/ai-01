@@ -282,4 +282,4 @@ The code was written with Claude Code as a pair programmer, under my direction a
 
 ## License
 
-MIT. Copyright (c) 2026 Richard K..
+MIT. Copyright (c) 2026 Richard K.
